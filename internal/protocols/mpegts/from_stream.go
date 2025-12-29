@@ -57,6 +57,7 @@ func FromStream(
 				track := &mcmpegts.Track{Codec: &tscodecs.H265{}}
 
 				var dtsExtractor *h265.DTSExtractor
+				var usePTSAsDTS bool
 
 				addTrack(
 					media,
@@ -67,17 +68,51 @@ func FromStream(
 							return nil
 						}
 
+						randomAccess := h265.IsRandomAccess(u.Payload.(unit.PayloadH265))
+
 						if dtsExtractor == nil {
-							if !h265.IsRandomAccess(u.Payload.(unit.PayloadH265)) {
-								return nil
+							if !randomAccess {
+								// For low latency, use PTS as DTS approximation if we haven't received IDR yet
+								// This allows immediate start without waiting for IDR frame
+								usePTSAsDTS = true
+								// Use PTS as DTS approximation for low latency
+								dts := u.PTS
+								sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
+								err := (*w).WriteH265(
+									track,
+									u.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
+									dts,
+									u.Payload.(unit.PayloadH265))
+								if err != nil {
+									return err
+								}
+								return bw.Flush()
 							}
 							dtsExtractor = &h265.DTSExtractor{}
 							dtsExtractor.Initialize()
+							usePTSAsDTS = false
 						}
 
-						dts, err := dtsExtractor.Extract(u.Payload.(unit.PayloadH265), u.PTS)
-						if err != nil {
-							return err
+						var dts int64
+						var err error
+						if usePTSAsDTS {
+							// Still using PTS as DTS approximation until we get IDR
+							dts = u.PTS
+							// If we receive IDR, switch to DTS extractor
+							if randomAccess {
+								dtsExtractor = &h265.DTSExtractor{}
+								dtsExtractor.Initialize()
+								usePTSAsDTS = false
+								dts, err = dtsExtractor.Extract(u.Payload.(unit.PayloadH265), u.PTS)
+								if err != nil {
+									return err
+								}
+							}
+						} else {
+							dts, err = dtsExtractor.Extract(u.Payload.(unit.PayloadH265), u.PTS)
+							if err != nil {
+								return err
+							}
 						}
 
 						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
@@ -96,6 +131,7 @@ func FromStream(
 				track := &mcmpegts.Track{Codec: &tscodecs.H264{}}
 
 				var dtsExtractor *h264.DTSExtractor
+				var usePTSAsDTS bool
 
 				addTrack(
 					media,
@@ -110,15 +146,47 @@ func FromStream(
 
 						if dtsExtractor == nil {
 							if !idrPresent {
-								return nil
+								// For low latency, use PTS as DTS approximation if we haven't received IDR yet
+								// This allows immediate start without waiting for IDR frame
+								usePTSAsDTS = true
+								// Use PTS as DTS approximation for low latency
+								dts := u.PTS
+								sconn.SetWriteDeadline(time.Now().Add(writeTimeout))
+								err := (*w).WriteH264(
+									track,
+									u.PTS, // no conversion is needed since clock rate is 90khz in both MPEG-TS and RTSP
+									dts,
+									u.Payload.(unit.PayloadH264))
+								if err != nil {
+									return err
+								}
+								return bw.Flush()
 							}
 							dtsExtractor = &h264.DTSExtractor{}
 							dtsExtractor.Initialize()
+							usePTSAsDTS = false
 						}
 
-						dts, err := dtsExtractor.Extract(u.Payload.(unit.PayloadH264), u.PTS)
-						if err != nil {
-							return err
+						var dts int64
+						var err error
+						if usePTSAsDTS {
+							// Still using PTS as DTS approximation until we get IDR
+							dts = u.PTS
+							// If we receive IDR, switch to DTS extractor
+							if idrPresent {
+								dtsExtractor = &h264.DTSExtractor{}
+								dtsExtractor.Initialize()
+								usePTSAsDTS = false
+								dts, err = dtsExtractor.Extract(u.Payload.(unit.PayloadH264), u.PTS)
+								if err != nil {
+									return err
+								}
+							}
+						} else {
+							dts, err = dtsExtractor.Extract(u.Payload.(unit.PayloadH264), u.PTS)
+							if err != nil {
+								return err
+							}
 						}
 
 						sconn.SetWriteDeadline(time.Now().Add(writeTimeout))

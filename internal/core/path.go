@@ -13,6 +13,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
+	"github.com/bluenviron/mediamtx/internal/forwarder"
 	"github.com/bluenviron/mediamtx/internal/hooks"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recorder"
@@ -86,6 +87,7 @@ type path struct {
 	publisherQuery                 string
 	stream                         *stream.Stream
 	recorder                       *recorder.Recorder
+	forwarderManager               *forwarder.Manager
 	readyTime                      time.Time
 	onUnDemandHook                 func(string)
 	onNotReadyHook                 func()
@@ -134,6 +136,19 @@ func (pa *path) initialize() {
 	pa.chRemoveReader = make(chan defs.PathRemoveReaderReq)
 	pa.chAPIPathsGet = make(chan pathAPIPathsGetReq)
 	pa.done = make(chan struct{})
+
+	// initialize forwarder manager
+	if len(pa.conf.SRTForwardTargets) > 0 {
+		pa.forwarderManager = forwarder.NewManager(
+			pa.ctx,
+			pa.conf.SRTForwardTargets,
+			nil, // stream will be set later
+			pa,
+			time.Duration(pa.writeTimeout),
+			int(pa.udpReadBufferSize),
+			pa.name, // path name for variable substitution
+		)
+	}
 
 	pa.Log(logger.Debug, "created")
 
@@ -219,6 +234,10 @@ func (pa *path) run() {
 
 	if pa.stream != nil {
 		pa.setNotReady()
+	}
+
+	if pa.forwarderManager != nil {
+		pa.forwarderManager.Stop()
 	}
 
 	if pa.source != nil {
@@ -715,6 +734,11 @@ func (pa *path) setReady(desc *description.Session, generateRTPPackets bool, fil
 		Query:           pa.publisherQuery,
 	})
 
+	// start forwarder
+	if pa.forwarderManager != nil && pa.stream != nil {
+		pa.forwarderManager.Start(pa.stream)
+	}
+
 	pa.parent.pathReady(pa)
 
 	return nil
@@ -736,6 +760,11 @@ func (pa *path) consumeOnHoldRequests() {
 
 func (pa *path) setNotReady() {
 	pa.parent.pathNotReady(pa)
+
+	// stop forwarder
+	if pa.forwarderManager != nil {
+		pa.forwarderManager.Stop()
+	}
 
 	for r := range pa.readers {
 		pa.executeRemoveReader(r)

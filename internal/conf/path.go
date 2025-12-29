@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	srt "github.com/datarhei/gosrt"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/mediamtx/internal/logger"
 )
@@ -229,6 +230,28 @@ type Path struct {
 	RunOnUnread                string   `json:"runOnUnread"`
 	RunOnRecordSegmentCreate   string   `json:"runOnRecordSegmentCreate"`
 	RunOnRecordSegmentComplete string   `json:"runOnRecordSegmentComplete"`
+
+	// SRT Forwarding
+	SRTForwardTargets []SRTForwardTarget `json:"srtForwardTargets"`
+}
+
+// SRTForwardTarget is a SRT forward target configuration.
+type SRTForwardTarget struct {
+	// Target SRT URL, format: srt://host:port?streamid=publish:path
+	URL string `json:"url"`
+
+	// Enable forwarding
+	Enable bool `json:"enable"`
+
+	// Reconnect configuration
+	Reconnect        bool     `json:"reconnect"`         // Auto reconnect on failure
+	ReconnectDelay   Duration `json:"reconnectDelay"`     // Reconnect delay
+	MaxReconnectTime Duration `json:"maxReconnectTime"`  // Maximum reconnect time
+
+	// SRT specific configuration
+	Passphrase string `json:"passphrase,omitempty"` // SRT passphrase
+	Latency    uint   `json:"latency"`               // Latency in milliseconds, default 120
+	PacketSize uint   `json:"packetSize"`            // Packet size, default 1316
 }
 
 func (pconf *Path) setDefaults() {
@@ -754,6 +777,31 @@ func (pconf *Path) validate(
 	}
 	if (pconf.RunOnDemand != "" || pconf.RunOnUnDemand != "") && pconf.Source != "publisher" {
 		return fmt.Errorf("'runOnDemand' and 'runOnUnDemand' can be used only when source is 'publisher'")
+	}
+
+	// SRT Forwarding
+	for i, target := range pconf.SRTForwardTargets {
+		if target.URL == "" {
+			return fmt.Errorf("srtForwardTargets[%d]: url is required", i)
+		}
+
+		// validate URL format
+		srtConf := srt.DefaultConfig()
+		_, err := srtConf.UnmarshalURL(target.URL)
+		if err != nil {
+			return fmt.Errorf("srtForwardTargets[%d]: invalid SRT URL: %w", i, err)
+		}
+
+		if target.Reconnect && target.ReconnectDelay <= 0 {
+			return fmt.Errorf("srtForwardTargets[%d]: reconnectDelay must be > 0 when reconnect is enabled", i)
+		}
+
+		if target.Passphrase != "" {
+			err := checkSRTPassphrase(target.Passphrase)
+			if err != nil {
+				return fmt.Errorf("srtForwardTargets[%d]: invalid passphrase: %w", i, err)
+			}
+		}
 	}
 
 	return nil

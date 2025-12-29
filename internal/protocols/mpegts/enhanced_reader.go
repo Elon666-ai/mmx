@@ -61,11 +61,16 @@ func (r *EnhancedReader) Initialize() error {
 		}
 	}
 
-	for tracksToParse > 0 {
+	// For low latency, limit the number of reads to find LATM config
+	// This prevents excessive buffering during initialization
+	maxReadsForLATM := 100 // Limit to ~100 MPEG-TS packets (~18KB) for low latency
+	readsCount := 0
+	for tracksToParse > 0 && readsCount < maxReadsForLATM {
 		err = mr.Read()
 		if err != nil {
 			return err
 		}
+		readsCount++
 	}
 
 	rr.Rewind()

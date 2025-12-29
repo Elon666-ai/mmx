@@ -41,7 +41,7 @@ html, body {
 </head>
 <body>
 
-<video id="video"></video>
+<video id="video" preload="none"></video>
 <div id="message"></div>
 
 <script>
@@ -82,6 +82,32 @@ const loadAttributesFromQuery = () => {
   defaultControls = video.controls;
 };
 
+// Optimize for low latency
+const optimizeForLowLatency = (stream) => {
+  // Get all tracks from the stream
+  const tracks = stream.getTracks();
+  
+  // Enable all tracks immediately
+  tracks.forEach(track => {
+    track.enabled = true;
+  });
+  
+  // Set video element properties for low latency
+  video.playsInline = true;
+  video.muted = true; // Muted to allow autoplay
+  
+  // Try to reduce buffering by setting video properties
+  if (video.buffered && video.buffered.length > 0) {
+    // If there's buffered data, try to seek to the end to reduce delay
+    const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+    const currentTime = video.currentTime;
+    // Only seek if we're significantly behind
+    if (bufferedEnd - currentTime > 0.5) {
+      video.currentTime = bufferedEnd - 0.1;
+    }
+  }
+};
+
 window.addEventListener('load', () => {
   loadAttributesFromQuery();
 
@@ -92,7 +118,52 @@ window.addEventListener('load', () => {
     },
     onTrack: (evt) => {
       setMessage('');
-      video.srcObject = evt.streams[0];
+      const stream = evt.streams[0];
+      video.srcObject = stream;
+      
+      // Optimize for low latency
+      optimizeForLowLatency(stream);
+      
+      // Try to play immediately when metadata is loaded
+      video.addEventListener('loadedmetadata', () => {
+        // Set currentTime to reduce initial buffering
+        if (video.buffered.length > 0) {
+          const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+          video.currentTime = Math.max(0, bufferedEnd - 0.1);
+        }
+        
+        // Play immediately
+        video.play().catch(err => {
+          console.warn('Autoplay failed:', err);
+        });
+      }, { once: true });
+      
+      // Monitor and reduce buffering during playback
+      let lastBufferedEnd = 0;
+      const checkBuffer = () => {
+        if (video.buffered.length > 0) {
+          const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+          const currentTime = video.currentTime;
+          const bufferAhead = bufferedEnd - currentTime;
+          
+          // If buffer is too large (> 1 second), seek forward
+          if (bufferAhead > 1.0 && bufferedEnd > lastBufferedEnd) {
+            video.currentTime = bufferedEnd - 0.2;
+            lastBufferedEnd = bufferedEnd;
+          }
+        }
+      };
+      
+      // Check buffer periodically (every 100ms)
+      const bufferCheckInterval = setInterval(() => {
+        if (video.readyState >= 2) { // HAVE_CURRENT_DATA
+          checkBuffer();
+        }
+      }, 100);
+      
+      // Clean up interval when video is paused or ended
+      video.addEventListener('pause', () => clearInterval(bufferCheckInterval));
+      video.addEventListener('ended', () => clearInterval(bufferCheckInterval));
     },
   });
 });
