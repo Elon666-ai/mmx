@@ -536,16 +536,36 @@ pathDefaults:
   srtPublishPassphrase:
 
   srtForwardTargets:
-    # 转发到远程 SRT 服务器
+    # 转发到远程 SRT 服务器, 支持同时转发到多个 SRT 服务器
     - url: srt://127.0.0.1:8900?streamid=publish:$MTX_PATH
-      enable: yes
+      enable: no
       reconnect: yes
       reconnectDelay: 2s
-      passphrase: 
+      passphrase:
       # For low latency, use a smaller latency value (20-40ms for localhost)
       # Note: SRT latency is bidirectional, so total latency = latency * 2
       latency: 20
       packetSize: 1316
+    - url: srt://127.0.0.1:8910?streamid=publish:$MTX_PATH
+      enable: no
+      reconnect: yes
+      reconnectDelay: 2s
+      passphrase:
+      # For low latency, use a smaller latency value (20-40ms for localhost)
+      # Note: SRT latency is bidirectional, so total latency = latency * 2
+      latency: 20
+      packetSize: 1316
+
+  # 转发到多个 WebRTC 服务器
+  webrtcForwardTargets:
+    - url: http://localhost:8899/$MTX_PATH/whip
+      enable: yes
+      reconnect: yes
+      reconnectDelay: 2s
+    - url: http://localhost:8909/$MTX_PATH/whip
+      enable: yes
+      reconnect: yes
+      reconnectDelay: 2s
 
   ###############################################
   # Default path settings -> RTSP source (when source is a RTSP or a RTSPS URL)

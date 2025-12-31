@@ -93,7 +93,16 @@ func (t *OutgoingTrack) WriteRTPWithNTP(pkt *rtp.Packet, ntp time.Time) error {
 	// use right SSRC in packet to make rtcpSender work
 	pkt.SSRC = t.ssrc
 
-	t.rtcpSender.ProcessPacket(pkt, ntp, true)
+	// rtcpSender may be nil if setup() hasn't been called yet
+	// This can happen when tracks are created before PeerConnection.Start()
+	if t.rtcpSender != nil {
+		t.rtcpSender.ProcessPacket(pkt, ntp, true)
+	}
 
-	return t.track.WriteRTP(pkt)
+	// track may be nil if setup() hasn't been called yet
+	if t.track != nil {
+		return t.track.WriteRTP(pkt)
+	}
+
+	return nil
 }

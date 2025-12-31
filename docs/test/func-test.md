@@ -6,15 +6,10 @@ webrtc: http://127.0.0.1:8889/live/sabado-fwv-hd4
 http://127.0.0.1:8900/live/sabado-fwv-hd4
 
 SRT推流/拉流，只测origin node，时延6s。
-obs publish srt://localhost:8890?streamid=publish:live/sabado3
-ffplay "srt://127.0.0.1:8890?streamid=read:live/sabado3"
+obs publish srt://localhost:8890?streamid=publish:live/sabado
+ffplay "srt://127.0.0.1:8890?streamid=read:live/sabado"
 obs推流设置gop为1s，时延一样很大！
 这就是协议的原因，比RTMP推流，FLV拉流的时延还要大！
-
-改为WHIP推流：http://localhost:8889/live/test/whip
-WHEP拉流: http://localhost:8889/live/test
-时延就缩小到1s以内。
-
 
 
 ===================================
@@ -63,4 +58,15 @@ D:\download\p2pcdnall\mmx.git\bin>mmx.exe mediamtx_edge.yml
 在 OBS 中将关键帧间隔设置为 1 秒。writeQueueSize = 16
 重启 OBS 推流，重新测试SRT拉流延迟还是有6s
 我现在只是测试origin node，时延一直很大，无法达到
+
+===============================================
+测试 WHIP推流/WHEP拉流的时延
+WHIP推流: http://localhost:8889/live/test/whip
+WHEP拉流: http://localhost:8889/live/test 源站view address
+    http://localhost:8899/live/test edge节点view address  时延: 最短130ms
+
+测试SRT推流，WHEP拉流时延
+obs publish:
+    srt://localhost:8890?streamid=publish:live/test
+    http://localhost:8909/live/test/  //第二个edge节点拉流，时延300ms。一定要把audio codec设置为opus。obs第一次设置失败，需要再次设置。
 

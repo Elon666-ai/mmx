@@ -233,6 +233,9 @@ type Path struct {
 
 	// SRT Forwarding
 	SRTForwardTargets []SRTForwardTarget `json:"srtForwardTargets"`
+
+	// WebRTC Forwarding
+	WebRTCForwardTargets []WebRTCForwardTarget `json:"webrtcForwardTargets"`
 }
 
 // SRTForwardTarget is a SRT forward target configuration.
@@ -252,6 +255,23 @@ type SRTForwardTarget struct {
 	Passphrase string `json:"passphrase,omitempty"` // SRT passphrase
 	Latency    uint   `json:"latency"`               // Latency in milliseconds, default 120
 	PacketSize uint   `json:"packetSize"`            // Packet size, default 1316
+}
+
+// WebRTCForwardTarget is a WebRTC forward target configuration.
+type WebRTCForwardTarget struct {
+	// Target WebRTC URL, format: http://host:port/path/whip or https://host:port/path/whip
+	URL string `json:"url"`
+
+	// Enable forwarding
+	Enable bool `json:"enable"`
+
+	// Reconnect configuration
+	Reconnect        bool     `json:"reconnect"`         // Auto reconnect on failure
+	ReconnectDelay   Duration `json:"reconnectDelay"`     // Reconnect delay
+	MaxReconnectTime Duration `json:"maxReconnectTime"`  // Maximum reconnect time
+
+	// WebRTC specific configuration
+	Fingerprint string `json:"fingerprint,omitempty"` // TLS fingerprint for verification
 }
 
 func (pconf *Path) setDefaults() {
@@ -801,6 +821,35 @@ func (pconf *Path) validate(
 			if err != nil {
 				return fmt.Errorf("srtForwardTargets[%d]: invalid passphrase: %w", i, err)
 			}
+		}
+	}
+
+	// WebRTC Forwarding
+	for i, target := range pconf.WebRTCForwardTargets {
+		if target.URL == "" {
+			return fmt.Errorf("webrtcForwardTargets[%d]: url is required", i)
+		}
+
+		// validate URL format
+		u, err := url.Parse(target.URL)
+		if err != nil {
+			return fmt.Errorf("webrtcForwardTargets[%d]: invalid URL: %w", i, err)
+		}
+
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return fmt.Errorf("webrtcForwardTargets[%d]: url scheme must be 'http' or 'https'", i)
+		}
+
+		if u.Host == "" {
+			return fmt.Errorf("webrtcForwardTargets[%d]: url host must be provided", i)
+		}
+
+		if !strings.HasSuffix(u.Path, "/whip") {
+			return fmt.Errorf("webrtcForwardTargets[%d]: url path must end with '/whip'", i)
+		}
+
+		if target.Reconnect && target.ReconnectDelay <= 0 {
+			return fmt.Errorf("webrtcForwardTargets[%d]: reconnectDelay must be > 0 when reconnect is enabled", i)
 		}
 	}
 

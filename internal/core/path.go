@@ -138,14 +138,16 @@ func (pa *path) initialize() {
 	pa.done = make(chan struct{})
 
 	// initialize forwarder manager
-	if len(pa.conf.SRTForwardTargets) > 0 {
+	if len(pa.conf.SRTForwardTargets) > 0 || len(pa.conf.WebRTCForwardTargets) > 0 {
 		pa.forwarderManager = forwarder.NewManager(
 			pa.ctx,
 			pa.conf.SRTForwardTargets,
+			pa.conf.WebRTCForwardTargets,
 			nil, // stream will be set later
 			pa,
 			time.Duration(pa.writeTimeout),
 			int(pa.udpReadBufferSize),
+			pa.udpReadBufferSize,
 			pa.name, // path name for variable substitution
 		)
 	}

@@ -24,11 +24,13 @@ type Manager struct {
 // NewManager creates a new forwarder manager.
 func NewManager(
 	ctx context.Context,
-	targets []conf.SRTForwardTarget,
+	srtTargets []conf.SRTForwardTarget,
+	webrtcTargets []conf.WebRTCForwardTarget,
 	stream *stream.Stream,
 	parent logger.Writer,
 	writeTimeout time.Duration,
 	udpMaxPayloadSize int,
+	udpReadBufferSize uint,
 	pathName string,
 ) *Manager {
 	ctx, ctxCancel := context.WithCancel(ctx)
@@ -42,8 +44,8 @@ func NewManager(
 		udpMaxPayloadSize: udpMaxPayloadSize,
 	}
 
-	// create forwarders
-	for _, target := range targets {
+	// create SRT forwarders
+	for _, target := range srtTargets {
 		if !target.Enable {
 			continue
 		}
@@ -58,6 +60,22 @@ func NewManager(
 		m.forwarders = append(m.forwarders, forwarder)
 	}
 
+	// create WebRTC forwarders
+	for _, target := range webrtcTargets {
+		if !target.Enable {
+			continue
+		}
+
+		// replace $MTX_PATH variable in URL
+		resolvedURL := strings.ReplaceAll(target.URL, "$MTX_PATH", pathName)
+		
+		// log resolved URL for debugging
+		parent.Log(logger.Debug, "WebRTC forwarder: resolved URL from '%s' to '%s'", target.URL, resolvedURL)
+
+		forwarder := newWebRTCForwarder(resolvedURL, &target, parent, writeTimeout, udpReadBufferSize)
+		m.forwarders = append(m.forwarders, forwarder)
+	}
+
 	return m
 }
 
@@ -65,11 +83,11 @@ func NewManager(
 func (m *Manager) Start(stream *stream.Stream) {
 	m.stream = stream
 
-	for _, f := range m.forwarders {
+		for _, f := range m.forwarders {
 		go func(forwarder Forwarder) {
 			err := forwarder.Start(stream)
 			if err != nil {
-				m.logger.Log(logger.Warn, "failed to start SRT forwarder %s: %v", forwarder.GetTarget(), err)
+				m.logger.Log(logger.Warn, "failed to start forwarder %s: %v", forwarder.GetTarget(), err)
 			}
 		}(f)
 	}
