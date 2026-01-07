@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Seamless Simulcast Test</title>
+    <style>
+        body { background: #000; color: #fff; font-family: monospace; display: flex; height: 100vh; margin: 0; }
+        #video-container { flex: 1; display: flex; justify-content: center; align-items: center; position: relative; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+        #stats { position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.7); padding: 10px; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="video-container">
+    <video id="video" autoplay playsinline muted controls></video>
+    <div id="stats">
+        <div>Res: <span id="res" style="color:#0f0">Waiting...</span></div>
+        <div>Bitrate: <span id="bitrate">0</span> kbps</div>
+        <div>PacketLoss: <span id="loss">0</span></div>
+    </div>
+</div>
+
+<script>
+    const url = "http://localhost:8899/live/simulcast/whep";
+    const video = document.getElementById('video');
+    let pc = null;
+    let lastBytes = 0;
+    let lastTime = Date.now();
+
+    async function start() {
+        pc = new RTCPeerConnection();
+        // 允许接收，不设限制，让 WebRTC 自动协商
+        pc.addTransceiver('video', { direction: 'recvonly' });
+        pc.addTransceiver('audio', { direction: 'recvonly' });
+
+        pc.ontrack = e => {
+            if(e.track.kind === 'video') video.srcObject = e.streams[0];
+        };
+
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const res = await fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/sdp'},
+            body: offer.sdp
+        });
+        const answer = await res.text();
+        await pc.setRemoteDescription({type: 'answer', sdp: answer});
+
+        setInterval(updateStats, 1000);
+    }
+
+    async function updateStats() {
+        if(!pc) return;
+        const stats = await pc.getStats();
+        stats.forEach(rep => {
+            if(rep.type === 'inbound-rtp' && rep.kind === 'video') {
+                const now = Date.now();
+                const bytes = rep.bytesReceived;
+                const bitrate = ((bytes - lastBytes) * 8) / (now - lastTime);
+                
+                document.getElementById('res').innerText = `${rep.frameWidth}x${rep.frameHeight}`;
+                document.getElementById('bitrate').innerText = (bitrate / 1000).toFixed(0);
+                document.getElementById('loss').innerText = rep.packetsLost;
+
+                lastBytes = bytes;
+                lastTime = now;
+            }
+        });
+    }
+
+    start();
+</script>
+</body>
+</html>

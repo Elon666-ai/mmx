@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MMXPlayer - Client Side ABR (HEVC/H264)</title>
+<style>
+    body {
+        margin: 0;
+        background: #000;
+        font-family: 'Segoe UI', sans-serif;
+        color: white;
+        overflow: hidden;
+    }
+    #video-container {
+        position: relative;
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+    video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+    }
+    /* 统计面板 */
+    #stats-panel {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 15px;
+        border-radius: 8px;
+        font-size: 14px;
+        line-height: 1.6;
+        pointer-events: none;
+        min-width: 220px;
+        border: 1px solid rgba(255,255,255,0.2);
+        z-index: 10;
+    }
+    /* 控制面板 */
+    #controls {
+        position: absolute;
+        bottom: 30px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(40, 40, 40, 0.9);
+        padding: 10px 20px;
+        border-radius: 30px;
+        display: flex;
+        gap: 15px;
+        align-items: center;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        z-index: 10;
+    }
+    select {
+        background: #333;
+        color: white;
+        border: 1px solid #555;
+        padding: 5px 10px;
+        border-radius: 4px;
+        outline: none;
+        cursor: pointer;
+    }
+    .status-dot {
+        width: 10px;
+        height: 10px;
+        background: #0f0;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 5px;
+    }
+</style>
+<!-- 请确保 reader.js 在同一目录下，或修改为正确的路径 -->
+<script src="./reader.js"></script>
+<!-- 核心播放器逻辑 -->
+<script src="./mmxplayer.js"></script>
+</head>
+<body>
+
+<div id="video-container">
+    <video id="video" autoplay playsinline muted></video>
+    
+    <!-- 统计信息 -->
+    <div id="stats-panel">Initializing...</div>
+
+    <!-- 切换控件 -->
+    <div id="controls">
+        <span style="font-weight:bold"><span class="status-dot"></span>Live</span>
+        <label for="quality-select">Quality:</label>
+        <select id="quality-select">
+            <option value="auto" selected>Auto (ABR)</option>
+            <option value="1080p">1080P (High)</option>
+            <option value="720p">720P (Std)</option>
+            <option value="540p">540P (Low)</option>
+            <option value="audio">Audio Only</option>
+        </select>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        // 配置 MediaMTX 服务器基础地址
+        // 如果您的 index.html 和流在同一个域，可以直接写 window.location.origin
+        // 否则填写如 'http://localhost:8899/'
+        const BASE_URL = 'http://localhost:8899/'; 
+
+        const videoEl = document.getElementById('video');
+        const statsEl = document.getElementById('stats-panel');
+        const selector = document.getElementById('quality-select');
+
+        // 初始化播放器
+        const player = new MMXPlayer(videoEl, statsEl, BASE_URL);
+        
+        // 启动播放
+        player.start();
+
+        // 绑定 UI 事件
+        selector.addEventListener('change', (e) => {
+            player.manualSwitch(e.target.value);
+        });
+
+        // 页面关闭时清理
+        window.addEventListener('beforeunload', () => {
+            player.destroy();
+        });
+    });
+</script>
+
+</body>
+</html>

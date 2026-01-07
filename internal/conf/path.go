@@ -236,6 +236,12 @@ type Path struct {
 
 	// WebRTC Forwarding
 	WebRTCForwardTargets []WebRTCForwardTarget `json:"webrtcForwardTargets"`
+
+	// SRT Transcoding
+	SRTTranscoding *SRTTranscodingConfig `json:"srtTranscoding,omitempty"`
+
+	// Simulcast WebRTC
+	SimulcastConfig *SimulcastConfig `json:"simulcastConfig,omitempty"`
 }
 
 // SRTForwardTarget is a SRT forward target configuration.
@@ -671,6 +677,15 @@ func (pconf *Path) validate(
 			primary.RPICameraSecondaryMJPEGQuality = pconf.RPICameraMJPEGQuality
 		}
 
+	case strings.HasPrefix(pconf.Source, "transcoder:"):
+		// transcoder source is validated in staticsources handler
+
+	case pconf.Source == "simulcast":
+		// simulcast source is validated in staticsources handler
+		if pconf.SimulcastConfig == nil || !pconf.SimulcastConfig.Enable {
+			return fmt.Errorf("simulcast source requires simulcastConfig to be enabled")
+		}
+
 	default:
 		return fmt.Errorf("invalid source: '%s'", pconf.Source)
 	}
@@ -850,6 +865,48 @@ func (pconf *Path) validate(
 
 		if target.Reconnect && target.ReconnectDelay <= 0 {
 			return fmt.Errorf("webrtcForwardTargets[%d]: reconnectDelay must be > 0 when reconnect is enabled", i)
+		}
+	}
+
+	// Simulcast WebRTC
+	if pconf.SimulcastConfig != nil && pconf.SimulcastConfig.Enable {
+		if len(pconf.SimulcastConfig.Inputs) == 0 {
+			return fmt.Errorf("simulcastConfig: inputs cannot be empty when enabled")
+		}
+
+		videoLayers := make(map[string]bool)
+		hasAudio := false
+
+		for i, input := range pconf.SimulcastConfig.Inputs {
+			if input.Path == "" {
+				return fmt.Errorf("simulcastConfig.inputs[%d]: path cannot be empty", i)
+			}
+
+			if input.Type != "video" && input.Type != "audio" {
+				return fmt.Errorf("simulcastConfig.inputs[%d]: type must be 'video' or 'audio'", i)
+			}
+
+			if input.Type == "video" {
+				if input.Layer != "high" && input.Layer != "medium" && input.Layer != "low" {
+					return fmt.Errorf("simulcastConfig.inputs[%d]: video layer must be 'high', 'medium', or 'low'", i)
+				}
+				if input.Resolution == "" {
+					return fmt.Errorf("simulcastConfig.inputs[%d]: video resolution cannot be empty", i)
+				}
+				if videoLayers[input.Layer] {
+					return fmt.Errorf("simulcastConfig.inputs[%d]: duplicate video layer '%s'", i, input.Layer)
+				}
+				videoLayers[input.Layer] = true
+			} else {
+				if hasAudio {
+					return fmt.Errorf("simulcastConfig.inputs[%d]: only one audio input is allowed", i)
+				}
+				hasAudio = true
+			}
+
+			if input.Bitrate == 0 {
+				return fmt.Errorf("simulcastConfig.inputs[%d]: bitrate cannot be zero", i)
+			}
 		}
 	}
 

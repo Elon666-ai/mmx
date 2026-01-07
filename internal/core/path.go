@@ -33,6 +33,7 @@ type pathParent interface {
 	pathNotReady(*path)
 	closePath(*path)
 	AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
+	RemoveReader(req defs.PathRemoveReaderReq)
 }
 
 type pathOnDemandState int

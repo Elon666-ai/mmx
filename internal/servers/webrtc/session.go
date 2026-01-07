@@ -320,7 +320,7 @@ func (s *session) runRead() (int, error) {
 
 	r := &stream.Reader{Parent: s}
 
-	err = webrtc.FromStream(strm.Desc, r, pc)
+	err = webrtc.FromStreamWithConfig(strm.Desc, r, pc, path)
 	if err != nil {
 		return http.StatusBadRequest, err
 	}

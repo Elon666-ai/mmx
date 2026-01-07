@@ -17,6 +17,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtpvp9"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/g711"
 	"github.com/bluenviron/mediacommon/v2/pkg/codecs/opus"
+	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/unit"
@@ -68,6 +69,7 @@ func setupVideoTrack(
 	desc *description.Session,
 	r *stream.Reader,
 	pc *PeerConnection,
+	pathConf interface{ SafeConf() *conf.Path },
 ) (format.Format, error) {
 	var av1Format *format.AV1
 	media := desc.FindFormat(&av1Format)
@@ -279,6 +281,34 @@ func setupVideoTrack(
 		}
 		pc.OutgoingTracks = append(pc.OutgoingTracks, track)
 
+		// Configure simulcast if path has simulcast config
+		if pathConf != nil {
+			conf := pathConf.SafeConf()
+			if conf != nil && conf.SimulcastConfig != nil && conf.SimulcastConfig.Enable {
+				encodings := make([]webrtc.RTPEncodingParameters, 0)
+				for _, input := range conf.SimulcastConfig.Inputs {
+					if input.Type == "video" && input.Layer != "" {
+						ssrc, err := randUint32()
+						if err != nil {
+							return nil, fmt.Errorf("failed to generate SSRC for layer %s: %w", input.Layer, err)
+						}
+						encodings = append(encodings, webrtc.RTPEncodingParameters{
+							RTPCodingParameters: webrtc.RTPCodingParameters{
+								RID:  input.Layer,
+								SSRC: webrtc.SSRC(ssrc),
+							},
+						})
+					}
+				}
+				if len(encodings) > 0 {
+					err := track.ConfigureSimulcast(encodings)
+					if err != nil {
+						return nil, fmt.Errorf("failed to configure simulcast: %w", err)
+					}
+				}
+			}
+		}
+
 		encoder := &rtph264.Encoder{
 			PayloadType:    96,
 			PayloadMaxSize: webrtcPayloadMaxSize,
@@ -290,6 +320,26 @@ func setupVideoTrack(
 
 		firstReceived := false
 		var lastPTS int64
+
+		// Determine which RID to use for this track
+		// For simulcast, we need to determine which layer this stream represents
+		// This will be handled by the simulcast source when writing packets
+		var currentRID string
+		if pathConf != nil {
+			conf := pathConf.SafeConf()
+			if conf != nil && conf.SimulcastConfig != nil && conf.SimulcastConfig.Enable {
+				// For simulcast, the source will handle RID selection
+				// We'll use the first layer as default
+				if len(conf.SimulcastConfig.Inputs) > 0 {
+					for _, input := range conf.SimulcastConfig.Inputs {
+						if input.Type == "video" && input.Layer != "" {
+							currentRID = input.Layer
+							break
+						}
+					}
+				}
+			}
+		}
 
 		r.OnData(
 			media,
@@ -314,7 +364,7 @@ func setupVideoTrack(
 				for _, pkt := range packets {
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
 					pkt.Timestamp += u.RTPPackets[0].Timestamp
-					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+					track.WriteRTPWithRID(pkt, ntp, currentRID) //nolint:errcheck
 				}
 
 				return nil
@@ -653,7 +703,17 @@ func FromStream(
 	r *stream.Reader,
 	pc *PeerConnection,
 ) error {
-	videoFormat, err := setupVideoTrack(desc, r, pc)
+	return FromStreamWithConfig(desc, r, pc, nil)
+}
+
+// FromStreamWithConfig maps a MediaMTX stream to a WebRTC connection with path configuration
+func FromStreamWithConfig(
+	desc *description.Session,
+	r *stream.Reader,
+	pc *PeerConnection,
+	pathConf interface{ SafeConf() *conf.Path },
+) error {
+	videoFormat, err := setupVideoTrack(desc, r, pc, pathConf)
 	if err != nil {
 		return err
 	}

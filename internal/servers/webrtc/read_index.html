@@ -3,177 +3,75 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width">
+<title>Debug Simulcast Player</title>
 <style>
-html, body {
-	margin: 0;
-	padding: 0;
-	height: 100%;
-	font-family: 'Arial', sans-serif;
-}
-#video {
-	position: absolute;
-	top: 0;
-	left: 0;
-	width: 100%;
-	height: 100%;
-	background: rgb(30, 30, 30);
-}
-#message {
-	position: absolute;
-	left: 0;
-	top: 0;
-	width: 100%;
-	height: 100%;
-	display: flex;
-	align-items: center;
-	text-align: center;
-	justify-content: center;
-	font-size: 16px;
-	font-weight: bold;
-	color: white;
-	pointer-events: none;
-	padding: 20px;
-	box-sizing: border-box;
-	text-shadow: 0 0 5px black;
-}
+    body { background: #111; color: white; font-family: monospace; display: flex; flex-direction: column; height: 100vh; margin: 0; }
+    #video-container { flex: 1; position: relative; display: flex; align-items: center; justify-content: center; background: #000; }
+    video { max-width: 100%; max-height: 100%; }
+    #status { padding: 10px; background: #333; height: 100px; overflow-y: auto; border-top: 1px solid #555; }
+    .log-line { margin: 2px 0; border-bottom: 1px solid #444; }
+    .error { color: #ff5555; }
+    .success { color: #55ff55; }
 </style>
-<script defer src="./reader.js"></script>
+<script src="./reader.js"></script>
 </head>
 <body>
 
-<video id="video" preload="none"></video>
-<div id="message"></div>
+<div id="video-container">
+    <video id="video" autoplay playsinline muted controls></video>
+</div>
+<div id="status">Waiting for connection...</div>
 
 <script>
-
-const video = document.getElementById('video');
-const message = document.getElementById('message');
-let defaultControls = false;
-let reader = null;
-
-const setMessage = (str) => {
-  if (str !== '') {
-    video.controls = false;
-  } else {
-    video.controls = defaultControls;
-  }
-  message.innerText = str;
-};
-
-const parseBoolString = (str, defaultVal) => {
-  str = (str || '');
-
-  if (['1', 'yes', 'true'].includes(str.toLowerCase())) {
-    return true;
-  }
-  if (['0', 'no', 'false'].includes(str.toLowerCase())) {
-    return false;
-  }
-  return defaultVal;
-};
-
-const loadAttributesFromQuery = () => {
-  const params = new URLSearchParams(window.location.search);
-  video.controls = parseBoolString(params.get('controls'), true);
-  video.muted = parseBoolString(params.get('muted'), true);
-  video.autoplay = parseBoolString(params.get('autoplay'), true);
-  video.playsInline = parseBoolString(params.get('playsinline'), true);
-  video.disablepictureinpicture = parseBoolString(params.get('disablepictureinpicture'), false);
-  defaultControls = video.controls;
-};
-
-// Optimize for low latency
-const optimizeForLowLatency = (stream) => {
-  // Get all tracks from the stream
-  const tracks = stream.getTracks();
-  
-  // Enable all tracks immediately
-  tracks.forEach(track => {
-    track.enabled = true;
-  });
-  
-  // Set video element properties for low latency
-  video.playsInline = true;
-  video.muted = true; // Muted to allow autoplay
-  
-  // Try to reduce buffering by setting video properties
-  if (video.buffered && video.buffered.length > 0) {
-    // If there's buffered data, try to seek to the end to reduce delay
-    const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-    const currentTime = video.currentTime;
-    // Only seek if we're significantly behind
-    if (bufferedEnd - currentTime > 0.5) {
-      video.currentTime = bufferedEnd - 0.1;
+    const statusDiv = document.getElementById('status');
+    const video = document.getElementById('video');
+    
+    function log(msg, type='') {
+        const div = document.createElement('div');
+        div.className = 'log-line ' + type;
+        div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+        statusDiv.prepend(div);
+        console.log(msg);
     }
-  }
-};
 
-window.addEventListener('load', () => {
-  loadAttributesFromQuery();
-
-  reader = new MediaMTXWebRTCReader({
-    url: new URL('whep', window.location.href) + window.location.search,
-    onError: (err) => {
-      setMessage(err);
-    },
-    onTrack: (evt) => {
-      setMessage('');
-      const stream = evt.streams[0];
-      video.srcObject = stream;
-      
-      // Optimize for low latency
-      optimizeForLowLatency(stream);
-      
-      // Try to play immediately when metadata is loaded
-      video.addEventListener('loadedmetadata', () => {
-        // Set currentTime to reduce initial buffering
-        if (video.buffered.length > 0) {
-          const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-          video.currentTime = Math.max(0, bufferedEnd - 0.1);
-        }
+    window.addEventListener('load', () => {
+        // 1. 严格的 URL 处理
+        let baseUrl = window.location.href;
         
-        // Play immediately
-        video.play().catch(err => {
-          console.warn('Autoplay failed:', err);
+        // 移除 URL 中的 query parameters (?bitrate=...) 防止干扰
+        baseUrl = baseUrl.split('?')[0];
+
+        // 确保 URL 以 '/' 结尾
+        if (!baseUrl.endsWith('/')) {
+            baseUrl += '/';
+        }
+
+        // 拼接 whep
+        const whepUrl = baseUrl + 'whep';
+        
+        log(`Base URL: ${baseUrl}`);
+        log(`Target WHEP URL: ${whepUrl}`, 'success');
+
+        const reader = new MediaMTXWebRTCReader({
+            url: whepUrl,
+            onError: (err) => {
+                log(`ERROR: ${err}`, 'error');
+            },
+            onTrack: (evt) => {
+                log(`Received Track: ${evt.track.kind}`, 'success');
+                // 确保 Video 元素接收到流
+                if (video.srcObject !== evt.streams[0]) {
+                    video.srcObject = evt.streams[0];
+                    log("Stream assigned to video element.");
+                }
+                
+                // 强制尝试播放
+                video.play().catch(e => log(`Autoplay warning: ${e.message}`, 'error'));
+            }
         });
-      }, { once: true });
-      
-      // Monitor and reduce buffering during playback
-      let lastBufferedEnd = 0;
-      const checkBuffer = () => {
-        if (video.buffered.length > 0) {
-          const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-          const currentTime = video.currentTime;
-          const bufferAhead = bufferedEnd - currentTime;
-          
-          // If buffer is too large (> 1 second), seek forward
-          if (bufferAhead > 1.0 && bufferedEnd > lastBufferedEnd) {
-            video.currentTime = bufferedEnd - 0.2;
-            lastBufferedEnd = bufferedEnd;
-          }
-        }
-      };
-      
-      // Check buffer periodically (every 100ms)
-      const bufferCheckInterval = setInterval(() => {
-        if (video.readyState >= 2) { // HAVE_CURRENT_DATA
-          checkBuffer();
-        }
-      }, 100);
-      
-      // Clean up interval when video is paused or ended
-      video.addEventListener('pause', () => clearInterval(bufferCheckInterval));
-      video.addEventListener('ended', () => clearInterval(bufferCheckInterval));
-    },
-  });
-});
 
-window.addEventListener('beforeunload', () => {
-  if (reader !== null) {
-    reader.close();
-  }
-});
-
+        window.reader = reader; // expose for debug
+    });
 </script>
 
 </body>

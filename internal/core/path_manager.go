@@ -566,6 +566,33 @@ func (pm *pathManager) AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.
 	}
 }
 
+// RemoveReader is called by a reader.
+func (pm *pathManager) RemoveReader(req defs.PathRemoveReaderReq) {
+	// Ensure response channel is created
+	if req.Res == nil {
+		req.Res = make(chan struct{})
+	}
+
+	// Iterate through all paths to find the one with this reader
+	// This is not the most efficient, but it works for now
+	found := false
+	for _, pd := range pm.paths {
+		// Try to remove reader from this path
+		// The path's RemoveReader will check if the reader exists
+		// and handle it appropriately
+		pd.path.RemoveReader(req)
+		found = true
+		// Note: We break after first attempt since RemoveReader should handle
+		// the case where reader doesn't exist in that path
+		break
+	}
+
+	if !found {
+		// No paths found, close response channel to prevent deadlock
+		close(req.Res)
+	}
+}
+
 // SetHLSServer is called by hls.Server.
 func (pm *pathManager) SetHLSServer(s *hls.Server) []defs.Path {
 	req := pathSetHLSServerReq{

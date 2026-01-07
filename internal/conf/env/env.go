@@ -165,8 +165,23 @@ func loadEnvInternal(env map[string]string, prefix string, prv reflect.Value) er
 				continue
 			}
 
-			err := loadEnvInternal(env, prefix+"_"+
-				strings.ToUpper(strings.TrimSuffix(jsonTag, ",omitempty")), prv.Elem().Field(i))
+			fieldValue := prv.Elem().Field(i)
+			fieldPrefix := prefix + "_" + strings.ToUpper(strings.TrimSuffix(jsonTag, ",omitempty"))
+
+			// If field is a pointer type and is nil, check if we need to initialize it
+			if f.Type.Kind() == reflect.Pointer {
+				if fieldValue.IsNil() {
+					// Only initialize if there's at least one environment variable with this prefix
+					if envHasAtLeastAKeyWithPrefix(env, fieldPrefix) {
+						fieldValue.Set(reflect.New(f.Type.Elem()))
+					} else {
+						// No environment variables for this field, skip it
+						continue
+					}
+				}
+			}
+
+			err := loadEnvInternal(env, fieldPrefix, fieldValue)
 			if err != nil {
 				return err
 			}

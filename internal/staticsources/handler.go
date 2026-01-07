@@ -18,6 +18,7 @@ import (
 	ssrtp "github.com/bluenviron/mediamtx/internal/staticsources/rtp"
 	ssrtsp "github.com/bluenviron/mediamtx/internal/staticsources/rtsp"
 	sssrt "github.com/bluenviron/mediamtx/internal/staticsources/srt"
+	sssimulcast "github.com/bluenviron/mediamtx/internal/staticsources/simulcast"
 	sswebrtc "github.com/bluenviron/mediamtx/internal/staticsources/webrtc"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
@@ -52,6 +53,7 @@ type staticSource interface {
 
 type handlerPathManager interface {
 	AddReader(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error)
+	RemoveReader(req defs.PathRemoveReaderReq)
 }
 
 type handlerParent interface {
@@ -161,6 +163,23 @@ func (s *Handler) Initialize() {
 			LogLevel:          s.LogLevel,
 			Parent:            s,
 		}
+
+	case s.Conf.Source == "simulcast":
+		if s.Conf.SimulcastConfig == nil || !s.Conf.SimulcastConfig.Enable {
+			panic("simulcast source requires simulcastConfig to be enabled")
+		}
+		s.instance = sssimulcast.New(
+			s.Conf,
+			s.LogLevel,
+			s.ReadTimeout,
+			s.WriteTimeout,
+			s.WriteQueueSize,
+			s.UDPReadBufferSize,
+			s.RTPMaxPayloadSize,
+			s.Matches,
+			s.PathManager,
+			s,
+		)
 
 	default:
 		panic("should not happen")

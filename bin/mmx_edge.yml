@@ -407,7 +407,7 @@ webrtcIPsFromInterfaces: yes
 # An empty value means to use all available interfaces.
 webrtcIPsFromInterfacesList: []
 # List of additional hosts or IPs to send to clients.
-webrtcAdditionalHosts: []
+webrtcAdditionalHosts: ['127.0.0.1', 'localhost']
 # ICE servers. Needed only when local listeners can't be reached by clients.
 # STUN servers allows to obtain and share the public IP of the server.
 # TURN/TURNS servers forces all traffic through them.
@@ -764,9 +764,53 @@ pathDefaults:
 # for example "~^(test1|test2)$" will match both "test1" and "test2",
 # for example "~^prefix" will match all paths that start with "prefix".
 paths:
-  # example:
-  # my_camera:
-  #   source: rtsp://my_camera
+  # # 从 Origin Node 接收 1080p 流
+  # live/d1080v:
+  #   source: srt://localhost:8900?streamid=read:live/d1080v
+
+  # # 从 Origin Node 接收 720p 流
+  # live/d720v:
+  #   source: srt://localhost:8900?streamid=read:live/d720v
+
+  # # 从 Origin Node 接收 540p 流
+  # live/d540v:
+  #   source: srt://localhost:8900?streamid=read:live/d540v
+
+  # # 从 Origin Node 接收 audio 流
+  # live/audiov:
+  #   source: srt://localhost:8900?streamid=read:live/audiov
+
+  # Simulcast WebRTC 输出路径
+  live/simulcastv:
+    source: simulcast
+    simulcastConfig:
+      enable: yes
+      inputs:
+        # High layer: 1080p
+        - path: "live/d1080v"
+          layer: "high"
+          resolution: "1080x1920"
+          bitrate: 2000000
+          type: "video"
+        
+        # Medium layer: 720p
+        - path: "live/d720v"
+          layer: "medium"
+          resolution: "720x1280"
+          bitrate: 1000000
+          type: "video"
+        
+        # Low layer: 540p
+        - path: "live/d540v"
+          layer: "low"
+          resolution: "540x960"
+          bitrate: 400000
+          type: "video"
+        
+        # Audio
+        - path: "live/audiov"
+          type: "audio"
+          bitrate: 64000
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.

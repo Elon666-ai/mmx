@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MMXPlayer - Simulcast Client</title>
+<style>
+    body {
+        margin: 0;
+        background: #000;
+        font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        color: white;
+        overflow: hidden;
+        height: 100vh;
+        width: 100vw;
+    }
+
+    #video-container {
+        position: relative;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        background: #000;
+    }
+
+    video {
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+    }
+
+    /* --- 启动设置面板 --- */
+    #setup-panel {
+        position: absolute;
+        z-index: 100;
+        background: rgba(20, 20, 20, 0.95);
+        padding: 40px;
+        border-radius: 12px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+        text-align: center;
+        border: 1px solid #333;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+        width: 400px;
+        max-width: 90%;
+    }
+
+    #setup-panel h2 {
+        margin: 0 0 10px 0;
+        color: #fff;
+    }
+
+    .input-group {
+        display: flex;
+        flex-direction: column;
+        text-align: left;
+        gap: 8px;
+    }
+
+    label {
+        font-size: 13px;
+        color: #aaa;
+        font-weight: 600;
+    }
+
+    input[type="text"] {
+        background: #333;
+        border: 1px solid #555;
+        color: white;
+        padding: 12px;
+        border-radius: 6px;
+        font-size: 14px;
+        outline: none;
+        transition: border-color 0.2s;
+    }
+
+    input[type="text"]:focus {
+        border-color: #0f0;
+    }
+
+    button#start-btn {
+        background: #0078d7;
+        color: white;
+        border: none;
+        padding: 12px;
+        border-radius: 6px;
+        font-size: 16px;
+        cursor: pointer;
+        font-weight: 600;
+        transition: background 0.2s;
+    }
+
+    button#start-btn:hover {
+        background: #0063b1;
+    }
+
+    /* --- 播放器 UI (初始隐藏) --- */
+    .player-ui {
+        display: none;
+        transition: opacity 0.5s;
+    }
+
+    #stats-panel {
+        position: absolute;
+        top: 20px;
+        left: 20px;
+        background: rgba(0, 0, 0, 0.7);
+        padding: 15px;
+        border-radius: 8px;
+        font-size: 13px;
+        line-height: 1.6;
+        pointer-events: none;
+        min-width: 220px;
+        border: 1px solid rgba(255,255,255,0.15);
+        z-index: 10;
+        backdrop-filter: blur(5px);
+    }
+
+    #controls {
+        position: absolute;
+        bottom: 30px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(30, 30, 30, 0.85);
+        padding: 10px 25px;
+        border-radius: 50px;
+        display: flex;
+        gap: 20px;
+        align-items: center;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.6);
+        z-index: 10;
+        border: 1px solid rgba(255,255,255,0.1);
+        backdrop-filter: blur(10px);
+    }
+
+    select {
+        background: #222;
+        color: #ddd;
+        border: 1px solid #444;
+        padding: 6px 12px;
+        border-radius: 4px;
+        outline: none;
+        cursor: pointer;
+        font-size: 14px;
+    }
+
+    .status-dot {
+        width: 8px;
+        height: 8px;
+        background: #0f0;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 8px;
+        box-shadow: 0 0 5px #0f0;
+    }
+
+    .hidden {
+        display: none !important;
+    }
+</style>
+<!-- 引入 JS 库 -->
+<script src="./reader.js"></script>
+<script src="./mmxplayer.js"></script>
+</head>
+<body>
+
+<div id="video-container">
+    <video id="video" autoplay playsinline muted></video>
+
+    <!-- 1. 启动设置面板 -->
+    <div id="setup-panel">
+        <h2>WebRTC Simulcast Player</h2>
+        <div class="input-group">
+            <label for="url-input">WHEP Stream URL</label>
+            <input type="text" id="url-input" value="http://localhost:8899/live/simulcastv/whep" placeholder="http://ip:port/live/stream/whep">
+        </div>
+        <button id="start-btn">Start Playback</button>
+    </div>
+    
+    <!-- 2. 统计信息面板 (播放时显示) -->
+    <div id="stats-panel" class="player-ui">Initializing metrics...</div>
+
+    <!-- 3. 控制面板 (播放时显示) -->
+    <div id="controls" class="player-ui">
+        <span style="font-weight:600; display:flex; align-items:center;">
+            <span class="status-dot"></span>Live
+        </span>
+        <div style="display:flex; align-items:center; gap:8px;">
+            <label for="quality-select" style="margin:0; font-weight:normal;">Quality:</label>
+            <select id="quality-select">
+                <option value="auto" selected>Auto (ABR)</option>
+                <option value="high">High (Original)</option>
+                <option value="medium">Medium (Limit 1.5M)</option>
+                <option value="low">Low (Limit 500k)</option>
+                <option value="audio">Audio Only</option>
+            </select>
+        </div>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const startBtn = document.getElementById('start-btn');
+        const urlInput = document.getElementById('url-input');
+        const setupPanel = document.getElementById('setup-panel');
+        const playerUIs = document.querySelectorAll('.player-ui');
+        
+        const videoEl = document.getElementById('video');
+        const statsEl = document.getElementById('stats-panel');
+        const selector = document.getElementById('quality-select');
+
+        let player = null;
+
+        // 绑定开始按钮
+        startBtn.addEventListener('click', () => {
+            const url = urlInput.value.trim();
+            if (!url) {
+                alert("Please enter a valid WHEP URL");
+                return;
+            }
+
+            // 1. 隐藏设置面板
+            setupPanel.classList.add('hidden');
+            
+            // 2. 显示播放器 UI
+            playerUIs.forEach(el => el.style.display = 'block');
+            // Flex 布局特殊处理 controls
+            document.getElementById('controls').style.display = 'flex';
+
+            // 3. 初始化并启动播放器
+            initPlayer(url);
+        });
+
+        function initPlayer(streamUrl) {
+            console.log("Initializing player with URL:", streamUrl);
+
+            // 实例化 Simulcast 版 MMXPlayer
+            player = new MMXPlayer(videoEl, statsEl, streamUrl);
+            
+            player.start();
+
+            // 绑定切换事件
+            selector.addEventListener('change', (e) => {
+                if (player) {
+                    player.manualSwitch(e.target.value);
+                }
+            });
+        }
+
+        // 页面关闭清理
+        window.addEventListener('beforeunload', () => {
+            if (player) {
+                player.destroy();
+            }
+        });
+
+        // 允许回车键开始
+        urlInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') startBtn.click();
+        });
+    });
+</script>
+
+</body>
+</html>

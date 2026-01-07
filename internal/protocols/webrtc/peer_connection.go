@@ -574,10 +574,83 @@ func (co *PeerConnection) filterLocalDescription(desc *webrtc.SessionDescription
 		return nil, err
 	}
 
+	// Add simulcast support to SDP if tracks have simulcast encodings
+	err = co.addSimulcastToSDP(&psdp)
+	if err != nil {
+		return nil, err
+	}
+
 	out, _ := psdp.Marshal()
 	desc.SDP = string(out)
 
 	return desc, nil
+}
+
+// addSimulcastToSDP adds simulcast RID and attributes to SDP for tracks with simulcast encodings.
+// It only adds simulcast attributes if the remote offer also contains simulcast attributes,
+// or if this is a local description (offer) being created.
+func (co *PeerConnection) addSimulcastToSDP(psdp *sdp.SessionDescription) error {
+	// Find video media section
+	var videoMedia *sdp.MediaDescription
+	for _, media := range psdp.MediaDescriptions {
+		if media.MediaName.Media == "video" {
+			videoMedia = media
+			break
+		}
+	}
+
+	if videoMedia == nil {
+		return nil // No video media, nothing to do
+	}
+
+	// Find video track with simulcast encodings
+	var videoTrack *OutgoingTrack
+	for _, track := range co.OutgoingTracks {
+		if track.isVideo() && len(track.GetSimulcastEncodings()) > 0 {
+			videoTrack = track
+			break
+		}
+	}
+
+	if videoTrack == nil {
+		return nil // No simulcast track, nothing to do
+	}
+
+	encodings := videoTrack.GetSimulcastEncodings()
+	if len(encodings) == 0 {
+		return nil
+	}
+
+	// For recvonly connections (client receiving, server sending):
+	// - Client should NOT declare simulcast in offer (it's the receiver)
+	// - Server SHOULD declare simulcast in answer (it's the sender)
+	// So we always add simulcast to the answer if we have simulcast tracks,
+	// regardless of what the client offer contains.
+	// The client will handle the simulcast answer correctly.
+
+	// Add RID attributes for each encoding
+	var rids []string
+	for _, enc := range encodings {
+		if enc.RID != "" {
+			rids = append(rids, enc.RID)
+			// Add a=rid:send <rid> attribute
+			videoMedia.Attributes = append(videoMedia.Attributes, sdp.Attribute{
+				Key:   "rid",
+				Value: enc.RID + " send",
+			})
+		}
+	}
+
+	if len(rids) > 0 {
+		// Add a=simulcast:send <rid1>;rid2;rid3 attribute
+		simulcastValue := strings.Join(rids, ";")
+		videoMedia.Attributes = append(videoMedia.Attributes, sdp.Attribute{
+			Key:   "simulcast",
+			Value: "send " + simulcastValue,
+		})
+	}
+
+	return nil
 }
 
 // CreatePartialOffer creates a partial offer.
