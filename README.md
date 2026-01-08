@@ -160,9 +160,9 @@ mmx 在遵循原项目 License 的前提下，进行了功能扩展与工程化�
 
 ## 📫 联系方式
 
-- Issue
-- Discussion
-- Email
+- Issue: wiki
+- Discussion: https://discord.gg/6cubxZeyh
+- Email: 91amor9119@gmail.com
 ```
 
 ---
