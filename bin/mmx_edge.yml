@@ -13,9 +13,9 @@ logDestinations: [stdout]
 # When destination is "stdout" or "file", emit logs in structured format (JSON).
 logStructured: no
 # When "file" is in logDestinations, this is the file which will receive logs.
-logFile: mediamtx_edge.log
+logFile: mtx_edge.log
 # When "syslog" is in logDestinations, use prefix for logs.
-sysLogPrefix: mediamtx_edge
+sysLogPrefix: mtx_edge
 
 # Timeout of read operations.
 readTimeout: 10s
@@ -295,7 +295,7 @@ rtspAuthMethods: [basic]
 # Global settings -> RTMP server
 
 # Enable publishing and reading streams with the RTMP protocol.
-rtmp: yes
+rtmp: no
 # Address of the RTMP listener. This is needed only when encryption is "no" or "optional".
 rtmpAddress: :1945
 # Encrypt connections with TLS (RTMPS).
@@ -764,53 +764,6 @@ pathDefaults:
 # for example "~^(test1|test2)$" will match both "test1" and "test2",
 # for example "~^prefix" will match all paths that start with "prefix".
 paths:
-  # # 从 Origin Node 接收 1080p 流
-  # live/d1080v:
-  #   source: srt://localhost:8900?streamid=read:live/d1080v
-
-  # # 从 Origin Node 接收 720p 流
-  # live/d720v:
-  #   source: srt://localhost:8900?streamid=read:live/d720v
-
-  # # 从 Origin Node 接收 540p 流
-  # live/d540v:
-  #   source: srt://localhost:8900?streamid=read:live/d540v
-
-  # # 从 Origin Node 接收 audio 流
-  # live/audiov:
-  #   source: srt://localhost:8900?streamid=read:live/audiov
-
-  # Simulcast WebRTC 输出路径
-  live/simulcastv:
-    source: simulcast
-    simulcastConfig:
-      enable: yes
-      inputs:
-        # High layer: 1080p
-        - path: "live/d1080v"
-          layer: "high"
-          resolution: "1080x1920"
-          bitrate: 2000000
-          type: "video"
-        
-        # Medium layer: 720p
-        - path: "live/d720v"
-          layer: "medium"
-          resolution: "720x1280"
-          bitrate: 1000000
-          type: "video"
-        
-        # Low layer: 540p
-        - path: "live/d540v"
-          layer: "low"
-          resolution: "540x960"
-          bitrate: 400000
-          type: "video"
-        
-        # Audio
-        - path: "live/audiov"
-          type: "audio"
-          bitrate: 64000
 
   # Settings under path "all_others" are applied to all paths that
   # do not match another entry.
