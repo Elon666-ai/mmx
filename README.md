@@ -133,6 +133,11 @@ mmx 旨在解决以下问题：
 
 ---
 
+## build && run
+进入mingw64环境，执行: sh build.sh
+生成目标文件bin\mmx.exe
+部署origNode: mmx.exe mmx_orig.yml
+部署edgeNode: mmx.exe mmx_edge.yml
 ## 📜 License & Credits
 
 本项目基于以下开源项目构建：
