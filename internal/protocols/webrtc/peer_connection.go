@@ -684,6 +684,27 @@ func (co *PeerConnection) AddRemoteCandidate(candidate *webrtc.ICECandidateInit)
 	return co.wr.AddICECandidate(*candidate)
 }
 
+// SetRemoteDescriptionForRenegotiation sets a remote description for renegotiation.
+func (co *PeerConnection) SetRemoteDescriptionForRenegotiation(offer *webrtc.SessionDescription) error {
+	return co.wr.SetRemoteDescription(*offer)
+}
+
+// CreateAnswerForRenegotiation creates an answer for renegotiation.
+func (co *PeerConnection) CreateAnswerForRenegotiation() (*webrtc.SessionDescription, error) {
+	answer, err := co.wr.CreateAnswer(nil)
+	return &answer, err
+}
+
+// SetLocalDescriptionForRenegotiation sets the local description for renegotiation.
+func (co *PeerConnection) SetLocalDescriptionForRenegotiation(answer *webrtc.SessionDescription) error {
+	return co.wr.SetLocalDescription(*answer)
+}
+
+// GetLocalDescription gets the current local description.
+func (co *PeerConnection) GetLocalDescription() *webrtc.SessionDescription {
+	return co.wr.LocalDescription()
+}
+
 // CreateFullAnswer creates a full answer.
 func (co *PeerConnection) CreateFullAnswer(offer *webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
 	err := co.wr.SetRemoteDescription(*offer)

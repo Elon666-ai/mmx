@@ -498,6 +498,17 @@ pathDefaults:
   fallback:
   # Use absolute timestamp of frames, instead of replacing them with the current time.
   useAbsoluteTimestamp: false
+  # Origin Node - Pull stream from origin node when local stream is not available.
+  # Format: srt://host:port (without path, path will be appended via streamid parameter)
+  # When a reader requests a stream that doesn't exist locally, the server will
+  # automatically pull it from the origin node using SRT protocol with streamid=read:path
+  origNode: srt://localhost:8890
+  # Pull from origin node on demand (when a reader requests the stream)
+  origNodeOnDemand: yes
+  # Timeout for origin node pull to become ready
+  origNodeStartTimeout: 10s
+  # Close origin node pull after this amount of time when there are no readers
+  origNodeCloseAfter: 10s
 
   ###############################################
   # Default path settings -> Record

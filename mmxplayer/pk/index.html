@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediaMTX WHEP Player</title>
+    <style>
+        body { background: #1a1a1a; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; display: flex; flex-direction: column; height: 100vh; margin: 0; }
+        
+        #controls { background: #333; padding: 15px; display: flex; gap: 10px; align-items: center; border-bottom: 1px solid #444; }
+        input[type="text"] { flex: 1; padding: 8px; border-radius: 4px; border: 1px solid #555; background: #222; color: #fff; font-size: 14px; }
+        button { padding: 8px 20px; border: none; border-radius: 4px; font-weight: bold; cursor: pointer; transition: 0.2s; }
+        #startBtn { background: #28a745; color: white; }
+        #startBtn:hover { background: #218838; }
+        #stopBtn { background: #dc3545; color: white; }
+        #stopBtn:hover { background: #c82333; }
+
+        #main-area { flex: 1; display: flex; position: relative; overflow: hidden; }
+        #video-container { flex: 1; display: flex; justify-content: center; align-items: center; background: #000; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+
+        #stats { 
+            position: absolute; top: 10px; right: 10px; width: 320px; max-height: calc(100% - 20px); 
+            background: rgba(0,0,0,0.85); border: 1px solid #444; padding: 10px; 
+            border-radius: 6px; overflow-y: auto; font-size: 13px; font-family: monospace;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3); pointer-events: none;
+        }
+        .stat-group { margin-bottom: 15px; }
+        .stat-title { color: #00bcd4; font-weight: bold; border-bottom: 1px dashed #555; margin-bottom: 5px; padding-bottom: 3px; }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
+        .stat-key { color: #aaa; }
+        .stat-val { color: #fff; font-weight: bold; }
+        .stat-val.good { color: #28a745; }
+        .stat-val.warn { color: #ffc107; }
+        .stat-val.bad { color: #dc3545; }
+    </style>
+</head>
+<body>
+
+<div id="controls">
+    <label for="urlInput">WHEP URL:</label>
+    <input type="text" id="urlInput" value="http://localhost:8899/live/720p_h264_1mbps/whep" placeholder="Enter MediaMTX WHEP URL">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn">Stop</button>
+</div>
+
+<div id="main-area">
+    <div id="video-container">
+        <video id="video" autoplay playsinline muted controls></video>
+    </div>
+    <div id="stats">
+        <div style="color: #888; text-align: center;">Waiting for stream...</div>
+    </div>
+</div>
+
+<script src="reader.js"></script>
+
+<script>
+    const urlInput = document.getElementById('urlInput');
+    const video = document.getElementById('video');
+    const statsContainer = document.getElementById('stats');
+    
+    let reader = null;
+    let statsInterval = null;
+    let lastStats = {
+        videoBytes: 0,
+        audioBytes: 0,
+        timestamp: 0
+    };
+    
+    // [新增] 加载时间统计变量
+    let loadStartTime = 0;
+    let isFirstFrameLogged = false;
+
+    document.getElementById('startBtn').addEventListener('click', startStream);
+    document.getElementById('stopBtn').addEventListener('click', stopStream);
+
+    // [新增] 监听 video playing 事件来统计耗时
+    video.addEventListener('playing', () => {
+        if (loadStartTime > 0 && !isFirstFrameLogged) {
+            const loadTime = Date.now() - loadStartTime;
+            console.log(`[Stats] Video Loaded in: ${loadTime} ms`);
+            isFirstFrameLogged = true;
+        }
+    });
+
+    function startStream() {
+        stopStream(); // 清理旧的
+
+        const url = urlInput.value.trim();
+        if (!url) return alert('Please enter a WHEP URL');
+
+        statsContainer.innerHTML = '<div style="color: #00bcd4; text-align: center;">Connecting...</div>';
+
+        // [新增] 记录开始时间，重置标志位
+        loadStartTime = Date.now();
+        isFirstFrameLogged = false;
+
+        reader = new MediaMTXWebRTCReader({
+            url: url,
+            // maxBitrate: 1500, 
+            onTrack: (evt) => {
+                if (evt.track.kind === 'video' || evt.track.kind === 'audio') {
+                    if (video.srcObject !== evt.streams[0]) {
+                        video.srcObject = evt.streams[0];
+                    }
+                }
+            },
+            onError: (err) => {
+                console.error("Reader Error:", err);
+                statsContainer.innerHTML = `<div style="color: red; text-align: center;">Error: ${err}</div>`;
+            }
+        });
+
+        lastStats.timestamp = Date.now();
+        statsInterval = setInterval(updateStats, 1000);
+    }
+
+    function stopStream() {
+        if (reader) {
+            reader.close();
+            reader = null;
+        }
+        if (statsInterval) {
+            clearInterval(statsInterval);
+            statsInterval = null;
+        }
+        video.srcObject = null;
+        statsContainer.innerHTML = '<div style="color: #888; text-align: center;">Stopped</div>';
+        lastStats = { videoBytes: 0, audioBytes: 0, timestamp: 0 };
+        loadStartTime = 0;
+        isFirstFrameLogged = false;
+    }
+
+    async function updateStats() {
+        if (!reader || !reader.pc) return;
+
+        const pc = reader.pc;
+        // 如果连接尚未建立完成，getStats 可能会抛错或返回空，这里加个状态检查
+        if (pc.connectionState !== 'connected' && pc.connectionState !== 'checking') return;
+
+        try {
+            const stats = await pc.getStats();
+            const now = Date.now();
+            const deltaTime = (now - lastStats.timestamp) / 1000; // seconds
+            if (deltaTime <= 0) return;
+
+            let videoStats = null;
+            let audioStats = null;
+            let networkStats = null;
+
+            stats.forEach(report => {
+                if (report.type === 'inbound-rtp' && report.kind === 'video') videoStats = report;
+                if (report.type === 'inbound-rtp' && report.kind === 'audio') audioStats = report;
+                if (report.type === 'candidate-pair' && report.state === 'succeeded') networkStats = report;
+            });
+
+            let html = '';
+
+            // Video Stats
+            if (videoStats) {
+                const bitrate = ((videoStats.bytesReceived - lastStats.videoBytes) * 8 / deltaTime / 1000).toFixed(0);
+                html += renderStatGroup('Video', {
+                    'Resolution': `${videoStats.frameWidth || 0}x${videoStats.frameHeight || 0}`,
+                    'Bitrate': `${bitrate} kbps`,
+                    'FPS': videoStats.framesPerSecond || 0,
+                    'Keyframes': videoStats.keyFramesDecoded || 0,
+                    'Jitter': `${(videoStats.jitter * 1000).toFixed(1)} ms`,
+                    'Packet Loss': `${videoStats.packetsLost} pkts`
+                });
+                lastStats.videoBytes = videoStats.bytesReceived;
+            }
+
+            // Audio Stats
+            if (audioStats) {
+                const bitrate = ((audioStats.bytesReceived - lastStats.audioBytes) * 8 / deltaTime / 1000).toFixed(0);
+                html += renderStatGroup('Audio', {
+                    'Bitrate': `${bitrate} kbps`,
+                    'Jitter': `${(audioStats.jitter * 1000).toFixed(1)} ms`,
+                    'Packet Loss': `${audioStats.packetsLost} pkts`
+                });
+                lastStats.audioBytes = audioStats.bytesReceived;
+            }
+
+            // Network Stats
+            if (networkStats) {
+                html += renderStatGroup('Network', {
+                    'State': pc.connectionState,
+                    'Protocol': networkStats.localCandidateId ? stats.get(networkStats.localCandidateId).protocol.toUpperCase() : 'N/A',
+                    'Remote IP': networkStats.remoteCandidateId ? stats.get(networkStats.remoteCandidateId).ip : 'N/A',
+                    'RTT': `${(networkStats.currentRoundTripTime * 1000).toFixed(1)} ms`
+                });
+            }
+
+            if (html) {
+                statsContainer.innerHTML = html;
+            }
+            lastStats.timestamp = now;
+        } catch (e) {
+            console.warn("Error updating stats:", e);
+        }
+    }
+
+    function renderStatGroup(title, data) {
+        let rows = '';
+        for (const [key, value] of Object.entries(data)) {
+            let valClass = '';
+            if (key === 'Packet Loss' && parseInt(value) > 0) valClass = 'warn';
+            if (key === 'State' && value === 'connected') valClass = 'good';
+            if (key === 'RTT' && parseFloat(value) > 200) valClass = 'bad';
+
+            rows += `<div class="stat-row">
+                        <span class="stat-key">${key}:</span>
+                        <span class="stat-val ${valClass}">${value}</span>
+                     </div>`;
+        }
+        return `<div class="stat-group">
+                    <div class="stat-title">${title}</div>
+                    ${rows}
+                </div>`;
+    }
+</script>
+</body>
+</html>

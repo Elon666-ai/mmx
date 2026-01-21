@@ -237,7 +237,12 @@ func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool)
 	ctx.Header("Access-Control-Expose-Headers", "ETag, ID, Accept-Patch, Link, Location")
 	ctx.Header("ETag", "*")
 	ctx.Header("ID", res.sx.uuid.String())
-	ctx.Header("Accept-Patch", "application/trickle-ice-sdpfrag")
+	if publish {
+		ctx.Header("Accept-Patch", "application/trickle-ice-sdpfrag")
+	} else {
+		// For WHEP (read), support both trickle ICE and SDP renegotiation
+		ctx.Header("Accept-Patch", "application/trickle-ice-sdpfrag, application/sdp")
+	}
 	ctx.Writer.Header()["Link"] = whip.LinkHeaderMarshal(servers)
 	ctx.Header("Location", sessionLocation(publish, pathName, ctx.Request.URL.RawQuery, res.sx.secret))
 	ctx.Writer.WriteHeader(http.StatusCreated)
@@ -247,18 +252,36 @@ func (s *httpServer) onWHIPPost(ctx *gin.Context, pathName string, publish bool)
 }
 
 func (s *httpServer) onWHIPPatch(ctx *gin.Context, pathName string, rawSecret string) {
+	s.parent.Log(logger.Info, "=== RECEIVED PATCH REQUEST ===")
+	s.parent.Log(logger.Info, "URL: %s %s", ctx.Request.Method, ctx.Request.URL.Path)
+	s.parent.Log(logger.Info, "PathName: %s, RawSecret: %s", pathName, rawSecret)
+
 	secret, err := uuid.Parse(rawSecret)
 	if err != nil {
+		s.parent.Log(logger.Error, "Invalid secret: %s", rawSecret)
 		writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid secret"))
 		return
 	}
 
 	contentType := httpp.ParseContentType(ctx.Request.Header.Get("Content-Type"))
-	if contentType != "application/trickle-ice-sdpfrag" {
+	s.parent.Log(logger.Info, "Parsed Content-Type: %s", contentType)
+
+	switch contentType {
+	case "application/trickle-ice-sdpfrag":
+		// Handle trickle ICE candidates (existing functionality)
+		s.onWHIPTrickleICE(ctx, pathName, secret)
+
+	case "application/sdp":
+		// Handle SDP renegotiation (new functionality for Simulcast)
+		s.onWHIPRenegotiation(ctx, pathName, secret)
+
+	default:
 		writeError(ctx, http.StatusBadRequest, fmt.Errorf("invalid Content-Type"))
 		return
 	}
+}
 
+func (s *httpServer) onWHIPTrickleICE(ctx *gin.Context, pathName string, secret uuid.UUID) {
 	byts, err := io.ReadAll(ctx.Request.Body)
 	if err != nil {
 		return
@@ -287,6 +310,42 @@ func (s *httpServer) onWHIPPatch(ctx *gin.Context, pathName string, rawSecret st
 	ctx.AbortWithStatusJSON(http.StatusNoContent, &defs.APIOK{
 		Status: "ok",
 	})
+}
+
+func (s *httpServer) onWHIPRenegotiation(ctx *gin.Context, pathName string, secret uuid.UUID) {
+	s.parent.Log(logger.Info, "=== RECEIVED SDP RENEGOTIATION REQUEST ===")
+	s.parent.Log(logger.Info, "Path: %s, Secret: %s", pathName, secret.String())
+	s.parent.Log(logger.Info, "Content-Type: %s", ctx.Request.Header.Get("Content-Type"))
+
+	offer, err := io.ReadAll(ctx.Request.Body)
+	if err != nil {
+		s.parent.Log(logger.Error, "Failed to read request body: %v", err)
+		return
+	}
+
+	s.parent.Log(logger.Info, "Offer SDP length: %d bytes", len(offer))
+
+	res := s.parent.renegotiateSession(webRTCRenegotiateSessionReq{
+		pathName: pathName,
+		secret:   secret,
+		offer:    offer,
+	})
+	if res.err != nil {
+		if errors.Is(res.err, ErrSessionNotFound) {
+			writeError(ctx, http.StatusNotFound, res.err)
+		} else {
+			writeError(ctx, http.StatusInternalServerError, res.err)
+		}
+		return
+	}
+
+	if len(res.answer) > 0 {
+		ctx.Header("Content-Type", "application/sdp")
+		ctx.Writer.WriteHeader(http.StatusOK)
+		ctx.Writer.Write(res.answer)
+	} else {
+		ctx.Writer.WriteHeader(http.StatusNoContent)
+	}
 }
 
 func (s *httpServer) onWHIPDelete(ctx *gin.Context, pathName string, rawSecret string) {
@@ -335,10 +394,14 @@ func (s *httpServer) onPage(ctx *gin.Context, pathName string, publish bool) {
 }
 
 func (s *httpServer) middlewarePreflightRequests(ctx *gin.Context) {
+	// Set CORS headers for all requests
+	ctx.Header("Access-Control-Allow-Origin", "*")
+	ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET, POST, PATCH, DELETE")
+	ctx.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match")
+	ctx.Header("Access-Control-Expose-Headers", "Location, ETag, ID, Accept-Patch, Link")
+
 	if ctx.Request.Method == http.MethodOptions &&
 		ctx.Request.Header.Get("Access-Control-Request-Method") != "" {
-		ctx.Header("Access-Control-Allow-Methods", "OPTIONS, GET, POST, PATCH, DELETE")
-		ctx.Header("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match")
 		ctx.AbortWithStatus(http.StatusNoContent)
 		return
 	}
@@ -381,6 +444,10 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 
 	// WHIP/WHEP, inside session
 	if m := reWHIPWHEPWithID.FindStringSubmatch(ctx.Request.URL.Path); m != nil {
+		s.parent.Log(logger.Info, "=== ROUTE MATCHED (with ID) ===")
+		s.parent.Log(logger.Info, "Path: %s, Method: %s", ctx.Request.URL.Path, ctx.Request.Method)
+		s.parent.Log(logger.Info, "Groups: pathName=%s, type=%s, secret=%s", m[1], m[2], m[3])
+
 		switch ctx.Request.Method {
 		case http.MethodPatch:
 			s.onWHIPPatch(ctx, m[1], m[3])

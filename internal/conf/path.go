@@ -165,6 +165,12 @@ type Path struct {
 	// Redirect source
 	SourceRedirect string `json:"sourceRedirect"`
 
+
+	// Origin Node - Pull from origin node
+	OrigNode                 string   `json:"origNode"`
+	OrigNodeOnDemand         bool     `json:"origNodeOnDemand"`
+	OrigNodeStartTimeout     Duration `json:"origNodeStartTimeout"`
+	OrigNodeCloseAfter       Duration `json:"origNodeCloseAfter"`
 	// Raspberry Pi Camera source
 	RPICameraCamID                 uint      `json:"rpiCameraCamID"`
 	RPICameraSecondary             bool      `json:"rpiCameraSecondary"`
@@ -931,4 +937,9 @@ func (pconf Path) HasOnDemandStaticSource() bool {
 // HasOnDemandPublisher checks whether the path has a on-demand publisher.
 func (pconf Path) HasOnDemandPublisher() bool {
 	return pconf.RunOnDemand != ""
+}
+
+// HasOrigNode checks whether the path has an origin node configuration.
+func (pconf Path) HasOrigNode() bool {
+	return pconf.OrigNode != "" && pconf.OrigNodeOnDemand
 }

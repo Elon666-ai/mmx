@@ -101,6 +101,10 @@ type path struct {
 	onDemandPublisherState         pathOnDemandState
 	onDemandPublisherReadyTimer    *time.Timer
 	onDemandPublisherCloseTimer    *time.Timer
+	origNodeStaticSourceState      pathOnDemandState
+	origNodeStaticSourceReadyTimer *time.Timer
+	origNodeStaticSourceCloseTimer *time.Timer
+	origNodeStaticSource           *staticsources.Handler
 
 	// in
 	chReloadConf              chan *conf.Path
@@ -127,6 +131,8 @@ func (pa *path) initialize() {
 	pa.onDemandStaticSourceCloseTimer = emptyTimer()
 	pa.onDemandPublisherReadyTimer = emptyTimer()
 	pa.onDemandPublisherCloseTimer = emptyTimer()
+	pa.origNodeStaticSourceReadyTimer = emptyTimer()
+	pa.origNodeStaticSourceCloseTimer = emptyTimer()
 	pa.chReloadConf = make(chan *conf.Path)
 	pa.chStaticSourceSetReady = make(chan defs.PathSourceStaticSetReadyReq)
 	pa.chStaticSourceSetNotReady = make(chan defs.PathSourceStaticSetNotReadyReq)
@@ -287,6 +293,20 @@ func (pa *path) runInner() error {
 		case <-pa.onDemandPublisherCloseTimer.C:
 			pa.doOnDemandPublisherCloseTimer()
 
+		case <-pa.origNodeStaticSourceReadyTimer.C:
+			pa.doOrigNodeStaticSourceReadyTimer()
+
+			if pa.shouldClose() {
+				return fmt.Errorf("not in use")
+			}
+
+		case <-pa.origNodeStaticSourceCloseTimer.C:
+			pa.doOrigNodeStaticSourceCloseTimer()
+
+			if pa.shouldClose() {
+				return fmt.Errorf("not in use")
+			}
+
 		case newConf := <-pa.chReloadConf:
 			pa.doReloadConf(newConf)
 
@@ -413,6 +433,12 @@ func (pa *path) doSourceStaticSetReady(req defs.PathSourceStaticSetReadyReq) {
 		pa.onDemandStaticSourceScheduleClose()
 	}
 
+	if pa.conf.HasOrigNode() {
+		pa.origNodeStaticSourceReadyTimer.Stop()
+		pa.origNodeStaticSourceReadyTimer = emptyTimer()
+		pa.origNodeStaticSourceState = pathOnDemandStateReady
+	}
+
 	pa.consumeOnHoldRequests()
 
 	req.Res <- defs.PathSourceStaticSetReadyRes{Stream: pa.stream}
@@ -427,6 +453,10 @@ func (pa *path) doSourceStaticSetNotReady(req defs.PathSourceStaticSetNotReadyRe
 
 	if pa.conf.HasOnDemandStaticSource() && pa.onDemandStaticSourceState != pathOnDemandStateInitial {
 		pa.onDemandStaticSourceStop("an error occurred")
+	}
+
+	if pa.conf.HasOrigNode() && pa.origNodeStaticSourceState != pathOnDemandStateInitial {
+		pa.origNodeStaticSourceStop("an error occurred")
 	}
 }
 
@@ -545,6 +575,14 @@ func (pa *path) doAddReader(req defs.PathAddReaderReq) {
 		return
 	}
 
+	if pa.conf.HasOrigNode() {
+		if pa.origNodeStaticSourceState == pathOnDemandStateInitial {
+			pa.origNodeStaticSourceStart(req.AccessRequest.Query)
+		}
+		pa.readerAddRequestsOnHold = append(pa.readerAddRequestsOnHold, req)
+		return
+	}
+
 	req.Res <- defs.PathAddReaderRes{Err: defs.PathNoStreamAvailableError{PathName: pa.name}}
 }
 
@@ -562,6 +600,10 @@ func (pa *path) doRemoveReader(req defs.PathRemoveReaderReq) {
 		} else if pa.conf.HasOnDemandPublisher() {
 			if pa.onDemandPublisherState == pathOnDemandStateReady {
 				pa.onDemandPublisherScheduleClose()
+			}
+		} else if pa.conf.HasOrigNode() {
+			if pa.origNodeStaticSourceState == pathOnDemandStateReady {
+				pa.origNodeStaticSourceScheduleClose()
 			}
 		}
 	}
@@ -644,7 +686,8 @@ func (pa *path) shouldClose() bool {
 		pa.source == nil &&
 		len(pa.readers) == 0 &&
 		len(pa.describeRequestsOnHold) == 0 &&
-		len(pa.readerAddRequestsOnHold) == 0
+		len(pa.readerAddRequestsOnHold) == 0 &&
+		pa.origNodeStaticSourceState == pathOnDemandStateInitial
 }
 
 func (pa *path) onDemandStaticSourceStart(query string) {
@@ -985,4 +1028,107 @@ func (pa *path) APIPathsGet(req pathAPIPathsGetReq) (*defs.APIPath, error) {
 	case <-pa.ctx.Done():
 		return nil, fmt.Errorf("terminated")
 	}
+}
+
+// origNodeStaticSourceStart starts pulling stream from origin node
+func (pa *path) origNodeStaticSourceStart(query string) {
+	origNodeURL := pa.buildOrigNodeURL()
+
+	pa.Log(logger.Info, "starting origin node source from: %s", origNodeURL)
+
+	pa.origNodeStaticSource = &staticsources.Handler{
+		Conf: &conf.Path{
+			Name:                       pa.name,
+			Source:                     origNodeURL,
+			SourceOnDemand:             false,
+			SourceOnDemandStartTimeout: pa.conf.OrigNodeStartTimeout,
+			SourceOnDemandCloseAfter:   pa.conf.OrigNodeCloseAfter,
+		},
+		LogLevel:          pa.logLevel,
+		ReadTimeout:       pa.readTimeout,
+		WriteTimeout:      pa.writeTimeout,
+		WriteQueueSize:    pa.writeQueueSize,
+		UDPReadBufferSize: pa.udpReadBufferSize,
+		RTPMaxPayloadSize: pa.rtpMaxPayloadSize,
+		Matches:           []string{},
+		PathManager:       pa.parent,
+		Parent:            pa,
+	}
+	pa.origNodeStaticSource.Initialize()
+	
+	// Set pa.source so that setReady can access it
+	pa.source = pa.origNodeStaticSource
+	
+	pa.origNodeStaticSourceState = pathOnDemandStateWaitingReady
+	pa.origNodeStaticSourceReadyTimer = time.NewTimer(time.Duration(pa.conf.OrigNodeStartTimeout))
+
+	pa.origNodeStaticSource.Start(true, query)
+}
+
+// buildOrigNodeURL builds the complete SRT URL with streamid
+func (pa *path) buildOrigNodeURL() string {
+	// origNode: srt://host:port
+	// path: camera1
+	// Result: srt://host:port?streamid=read:camera1
+	origNode := pa.conf.OrigNode
+	pathName := pa.name
+
+	return fmt.Sprintf("%s?streamid=read:%s", origNode, pathName)
+}
+
+// origNodeStaticSourceScheduleClose schedules closing of origin node source
+func (pa *path) origNodeStaticSourceScheduleClose() {
+	pa.origNodeStaticSourceState = pathOnDemandStateClosing
+	pa.origNodeStaticSourceCloseTimer = time.NewTimer(time.Duration(pa.conf.OrigNodeCloseAfter))
+}
+
+// origNodeStaticSourceStop stops the origin node source
+func (pa *path) origNodeStaticSourceStop(reason string) {
+	if pa.origNodeStaticSourceState == pathOnDemandStateClosing {
+		pa.origNodeStaticSourceCloseTimer = emptyTimer()
+	}
+
+	pa.origNodeStaticSourceState = pathOnDemandStateInitial
+
+	if pa.origNodeStaticSource != nil {
+		pa.origNodeStaticSource.Close(reason)
+		pa.origNodeStaticSource = nil
+		// Clear pa.source if it points to origNodeStaticSource
+		if pa.source != nil {
+			pa.source = nil
+		}
+	}
+}
+
+// doOrigNodeStaticSourceReadyTimer handles origin node ready timeout
+func (pa *path) doOrigNodeStaticSourceReadyTimer() {
+	if pa.origNodeStaticSourceState != pathOnDemandStateWaitingReady {
+		return
+	}
+
+	pa.Log(logger.Info, "origin node source ready timeout")
+
+	for _, req := range pa.readerAddRequestsOnHold {
+		req.Res <- defs.PathAddReaderRes{
+			Err: fmt.Errorf("origin node source ready timeout"),
+		}
+	}
+	pa.readerAddRequestsOnHold = pa.readerAddRequestsOnHold[:0]
+
+	if pa.origNodeStaticSource != nil {
+		pa.origNodeStaticSource.Close("ready timeout")
+		pa.origNodeStaticSource = nil
+		pa.source = nil
+	}
+
+	pa.origNodeStaticSourceState = pathOnDemandStateInitial
+}
+
+// doOrigNodeStaticSourceCloseTimer handles origin node close timer
+func (pa *path) doOrigNodeStaticSourceCloseTimer() {
+	if pa.origNodeStaticSourceState != pathOnDemandStateClosing {
+		return
+	}
+
+	pa.origNodeStaticSourceStop("on demand")
 }

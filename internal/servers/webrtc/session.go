@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,8 +67,12 @@ type session struct {
 	mutex     sync.RWMutex
 	pc        *webrtc.PeerConnection
 
-	chNew           chan webRTCNewSessionReq
-	chAddCandidates chan webRTCAddSessionCandidatesReq
+	chNew            chan webRTCNewSessionReq
+	chAddCandidates  chan webRTCAddSessionCandidatesReq
+	chRenegotiate   chan webRTCRenegotiateSessionReq
+
+	// Simulcast state
+	currentBandwidthLimit int // Current bandwidth limit in kbps (0 = unlimited)
 }
 
 func (s *session) initialize() {
@@ -79,6 +85,7 @@ func (s *session) initialize() {
 	s.secret = uuid.New()
 	s.chNew = make(chan webRTCNewSessionReq)
 	s.chAddCandidates = make(chan webRTCAddSessionCandidatesReq)
+	s.chRenegotiate = make(chan webRTCRenegotiateSessionReq)
 
 	s.Log(logger.Info, "created by %s", s.req.remoteAddr)
 
@@ -129,6 +136,14 @@ func (s *session) runInner() error {
 }
 
 func (s *session) runInner2() (int, error) {
+	// Handle renegotiation requests
+	select {
+	case renegReq := <-s.chRenegotiate:
+		return s.handleRenegotiation(renegReq)
+	default:
+		// Continue with initial session setup
+	}
+
 	if s.req.publish {
 		return s.runPublish()
 	}
@@ -418,6 +433,119 @@ func (s *session) readRemoteCandidates(pc *webrtc.PeerConnection) {
 	}
 }
 
+func (s *session) handleRenegotiation(req webRTCRenegotiateSessionReq) (int, error) {
+	s.Log(logger.Info, "=== SDP RENEGOTIATION START ===")
+	s.Log(logger.Info, "Received offer SDP (%d bytes):\n%s", len(req.offer), string(req.offer))
+
+	// Parse the new offer SDP
+	var sdp sdp.SessionDescription
+	err := sdp.Unmarshal(req.offer)
+	if err != nil {
+		s.Log(logger.Error, "Failed to parse SDP: %v", err)
+		return http.StatusBadRequest, fmt.Errorf("invalid SDP: %v", err)
+	}
+
+	// Extract bandwidth limit from b=AS attribute (for Simulcast)
+	bandwidthLimit := s.extractBandwidthLimit(&sdp)
+	s.currentBandwidthLimit = bandwidthLimit
+
+	s.Log(logger.Info, "Extracted bandwidth limit: %d kbps", bandwidthLimit)
+	s.Log(logger.Info, "SDP renegotiation with bandwidth limit: %d kbps", bandwidthLimit)
+
+	// TODO: Implement RTP source switching based on bandwidth limit
+	// For now, we perform the renegotiation handshake but don't actually change streams
+
+	// Perform proper WebRTC renegotiation:
+	// 1. Set the new remote offer
+	// 2. Create a new answer
+	// 3. Return the answer
+
+	if s.pc == nil {
+		s.Log(logger.Error, "No peer connection available for renegotiation")
+		return http.StatusBadRequest, fmt.Errorf("no peer connection available for renegotiation")
+	}
+
+	s.Log(logger.Info, "Peer connection available, proceeding with renegotiation")
+
+	// Set the remote offer (client's new offer)
+	offer := &pwebrtc.SessionDescription{
+		Type: pwebrtc.SDPTypeOffer,
+		SDP:  string(req.offer),
+	}
+
+	s.Log(logger.Info, "Setting remote description...")
+	err = s.pc.SetRemoteDescriptionForRenegotiation(offer)
+	if err != nil {
+		s.Log(logger.Error, "Failed to set remote description: %v", err)
+		return http.StatusBadRequest, fmt.Errorf("failed to set remote description: %v", err)
+	}
+	s.Log(logger.Info, "Remote description set successfully")
+
+	// Create answer
+	s.Log(logger.Info, "Creating answer...")
+	answer, err := s.pc.CreateAnswerForRenegotiation()
+	if err != nil {
+		s.Log(logger.Error, "Failed to create answer: %v", err)
+		return http.StatusInternalServerError, fmt.Errorf("failed to create answer: %v", err)
+	}
+	s.Log(logger.Info, "Answer created successfully")
+
+	// Set local description
+	s.Log(logger.Info, "Setting local description...")
+	err = s.pc.SetLocalDescriptionForRenegotiation(answer)
+	if err != nil {
+		s.Log(logger.Error, "Failed to set local description: %v", err)
+		return http.StatusInternalServerError, fmt.Errorf("failed to set local description: %v", err)
+	}
+	s.Log(logger.Info, "Local description set successfully")
+
+	// Wait for ICE gathering to complete
+	s.Log(logger.Info, "Waiting for ICE gathering to complete...")
+	select {
+	case <-s.pc.GatheringDone():
+		s.Log(logger.Info, "ICE gathering completed")
+	case <-time.After(2 * time.Second):
+		s.Log(logger.Warn, "ICE gathering timeout during renegotiation")
+	}
+
+	// Get the final answer
+	finalAnswer := s.pc.GetLocalDescription()
+	if finalAnswer == nil {
+		s.Log(logger.Error, "No local description available after renegotiation")
+		return http.StatusInternalServerError, fmt.Errorf("no local description available")
+	}
+	s.Log(logger.Info, "Final answer SDP (%d bytes):\n%s", len(finalAnswer.SDP), finalAnswer.SDP)
+
+	s.Log(logger.Info, "=== SDP RENEGOTIATION COMPLETED ===")
+
+	req.res <- webRTCRenegotiateSessionRes{
+		sx:     s,
+		answer: []byte(finalAnswer.SDP),
+	}
+
+	return 0, nil
+}
+
+func (s *session) extractBandwidthLimit(sdpDesc *sdp.SessionDescription) int {
+	// Look for video media section
+	for _, media := range sdpDesc.MediaDescriptions {
+		if media.MediaName.Media == "video" {
+			// Look for b=AS attribute
+			for _, attr := range media.Attributes {
+				if attr.Key == "b" && strings.HasPrefix(attr.Value, "AS:") {
+					parts := strings.Split(attr.Value, ":")
+					if len(parts) == 2 {
+						if bandwidth, err := strconv.Atoi(parts[1]); err == nil {
+							return bandwidth
+						}
+					}
+				}
+			}
+		}
+	}
+	return 0 // No bandwidth limit specified
+}
+
 // new is called by webRTCHTTPServer through Server.
 func (s *session) new(req webRTCNewSessionReq) webRTCNewSessionRes {
 	select {
@@ -439,6 +567,19 @@ func (s *session) addCandidates(
 
 	case <-s.ctx.Done():
 		return webRTCAddSessionCandidatesRes{err: fmt.Errorf("terminated")}
+	}
+}
+
+// renegotiate is called by webRTCHTTPServer through Server for SDP renegotiation.
+func (s *session) renegotiate(req webRTCRenegotiateSessionReq) webRTCRenegotiateSessionRes {
+	req.res = make(chan webRTCRenegotiateSessionRes)
+
+	select {
+	case s.chRenegotiate <- req:
+		return <-req.res
+
+	case <-s.ctx.Done():
+		return webRTCRenegotiateSessionRes{err: fmt.Errorf("terminated")}
 	}
 }
 
@@ -470,6 +611,7 @@ func (s *session) apiItem() *defs.APIWebRTCSession {
 	rtpPacketsJitter := float64(0)
 	rtcpPacketsReceived := uint64(0)
 	rtcpPacketsSent := uint64(0)
+	simulcastBandwidthLimit := s.currentBandwidthLimit
 
 	if s.pc != nil {
 		peerConnectionEstablished = true
@@ -506,8 +648,9 @@ func (s *session) apiItem() *defs.APIWebRTCSession {
 		RTPPacketsReceived:  rtpPacketsReceived,
 		RTPPacketsSent:      rtpPacketsSent,
 		RTPPacketsLost:      rtpPacketsLost,
-		RTPPacketsJitter:    rtpPacketsJitter,
-		RTCPPacketsReceived: rtcpPacketsReceived,
-		RTCPPacketsSent:     rtcpPacketsSent,
+		RTPPacketsJitter:       rtpPacketsJitter,
+		RTCPPacketsReceived:    rtcpPacketsReceived,
+		RTCPPacketsSent:        rtcpPacketsSent,
+		SimulcastBandwidthLimit: simulcastBandwidthLimit,
 	}
 }

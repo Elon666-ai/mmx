@@ -377,6 +377,7 @@ type APIWebRTCSession struct {
 	RTPPacketsJitter          float64               `json:"rtpPacketsJitter"`
 	RTCPPacketsReceived       uint64                `json:"rtcpPacketsReceived"`
 	RTCPPacketsSent           uint64                `json:"rtcpPacketsSent"`
+	SimulcastBandwidthLimit   int                   `json:"simulcastBandwidthLimit,omitempty"`
 }
 
 // APIWebRTCSessionList is a list of WebRTC sessions.

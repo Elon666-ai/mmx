@@ -170,6 +170,19 @@ type webRTCDeleteSessionReq struct {
 	res      chan webRTCDeleteSessionRes
 }
 
+type webRTCRenegotiateSessionRes struct {
+	sx     *session
+	answer []byte
+	err    error
+}
+
+type webRTCRenegotiateSessionReq struct {
+	pathName string
+	secret   uuid.UUID
+	offer    []byte
+	res      chan webRTCRenegotiateSessionRes
+}
+
 type serverMetrics interface {
 	SetWebRTCServer(defs.APIWebRTCServer)
 }
@@ -224,6 +237,7 @@ type Server struct {
 	chCloseSession         chan *session
 	chAddSessionCandidates chan webRTCAddSessionCandidatesReq
 	chDeleteSession        chan webRTCDeleteSessionReq
+	chRenegotiateSession   chan webRTCRenegotiateSessionReq
 	chAPISessionsList      chan serverAPISessionsListReq
 	chAPISessionsGet       chan serverAPISessionsGetReq
 	chAPIConnsKick         chan serverAPISessionsKickReq
@@ -244,6 +258,7 @@ func (s *Server) Initialize() error {
 	s.chCloseSession = make(chan *session)
 	s.chAddSessionCandidates = make(chan webRTCAddSessionCandidatesReq)
 	s.chDeleteSession = make(chan webRTCDeleteSessionReq)
+	s.chRenegotiateSession = make(chan webRTCRenegotiateSessionReq)
 	s.chAPISessionsList = make(chan serverAPISessionsListReq)
 	s.chAPISessionsGet = make(chan serverAPISessionsGetReq)
 	s.chAPIConnsKick = make(chan serverAPISessionsKickReq)
@@ -396,6 +411,31 @@ outer:
 			sx.Close()
 
 			req.res <- webRTCDeleteSessionRes{}
+
+		case req := <-s.chRenegotiateSession:
+			s.Log(logger.Info, "=== LOOKUP RENEGOTIATE SESSION ===")
+			s.Log(logger.Info, "Requested secret: %s", req.secret.String())
+			s.Log(logger.Info, "Requested path: %s", req.pathName)
+
+			sx, ok := s.sessionsBySecret[req.secret]
+			if !ok {
+				s.Log(logger.Error, "Session with secret %s not found", req.secret.String())
+				s.Log(logger.Info, "Available sessions:")
+				for secret, session := range s.sessionsBySecret {
+					s.Log(logger.Info, "  Secret: %s, Path: %s, UUID: %s", secret.String(), session.req.pathName, session.uuid.String())
+				}
+				req.res <- webRTCRenegotiateSessionRes{err: ErrSessionNotFound}
+				continue
+			}
+
+			if sx.req.pathName != req.pathName {
+				s.Log(logger.Error, "Session found but path mismatch: expected %s, got %s", req.pathName, sx.req.pathName)
+				req.res <- webRTCRenegotiateSessionRes{err: ErrSessionNotFound}
+				continue
+			}
+
+			s.Log(logger.Info, "Session found successfully: UUID=%s", sx.uuid.String())
+			req.res <- webRTCRenegotiateSessionRes{sx: sx}
 
 		case req := <-s.chAPISessionsList:
 			data := &defs.APIWebRTCSessionList{
@@ -550,6 +590,28 @@ func (s *Server) deleteSession(req webRTCDeleteSessionReq) error {
 
 	case <-s.ctx.Done():
 		return fmt.Errorf("terminated")
+	}
+}
+
+// renegotiateSession is called by webRTCHTTPServer for SDP renegotiation.
+func (s *Server) renegotiateSession(req webRTCRenegotiateSessionReq) webRTCRenegotiateSessionRes {
+	s.Log(logger.Info, "=== RENEGOTIATE SESSION REQUEST ===")
+	s.Log(logger.Info, "Looking for session with secret: %s", req.secret.String())
+
+	req.res = make(chan webRTCRenegotiateSessionRes)
+	select {
+	case s.chRenegotiateSession <- req:
+		res1 := <-req.res
+		if res1.err != nil {
+			s.Log(logger.Error, "Session lookup failed: %v", res1.err)
+			return res1
+		}
+
+		s.Log(logger.Info, "Found session with UUID: %s", res1.sx.uuid.String())
+		return res1.sx.renegotiate(req)
+
+	case <-s.ctx.Done():
+		return webRTCRenegotiateSessionRes{err: fmt.Errorf("terminated")}
 	}
 }
 
