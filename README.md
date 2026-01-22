@@ -59,6 +59,8 @@ mmx 旨在解决以下问题：
 
 ## 🏗️ 架构设计思路（High-Level Architecture）
 
+
+```
        ┌─────────────┐
        │  WebRTC In  │
        └──────┬──────┘
@@ -73,12 +75,15 @@ mmx 旨在解决以下问题：
               │
  ┌────────────┼─────────────┐
 
+```
+
 ┌────▼────┐  ┌────▼────┐  ┌─────▼─────┐
 │ WebRTC  │  │ WebRTC  │  │ WebRTC    │
 │ Client  │  │ Client  │  │ Client    │
 │ (Low)   │  │ (Mid)   │  │ (High)    │
 └─────────┘  └─────────┘  └───────────┘
 
+```
 
 ---
 
@@ -154,10 +159,6 @@ mmx 在遵循原项目 License 的前提下，进行了功能扩展与工程化�
 - Pull Request
 
 欢迎对 WebRTC / 实时音视频 / mediamtx 有兴趣的开发者交流。
-
----
-
-### 📫 联系我们 | Contact
 
 * **Issue / Wiki**: GitHub Wiki
 * **Community (Discord)**: [https://discord.gg/6cubxZeyh](https://discord.gg/6cubxZeyh)
