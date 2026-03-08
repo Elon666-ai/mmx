@@ -1,0 +1,14 @@
+{
+    "HttpPort": 8080,
+    "InputStreamList": [
+        "rtmp://play.numericgame.ph/live/gsp2w-fwv"
+    ],
+    "OutputStreamer": {
+        "RtmpServer": "rtmp://localhost:1935"
+    },
+    "Storage":{
+        "OutputBucket": "s3://ge-lotto-live"
+    },
+    "StatApiAddr": "https://lotto-videostat.numericgame.io/api/stat/record",
+    "StatApiSecret": "123@VideoStat"
+}

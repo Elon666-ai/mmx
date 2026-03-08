@@ -14,6 +14,7 @@ import (
 
 type recorderInstance struct {
 	pathFormat        string
+	savepath          string
 	format            conf.RecordFormat
 	partDuration      time.Duration
 	maxPartSize       conf.StringSize
@@ -29,9 +30,17 @@ type recorderInstance struct {
 	format2     format
 	skip        bool
 	reader      *stream.Reader
+	splitFlag    int
+	splitStartTS int64
+	table        string
+	game         string
+	round        string
+	recordFile   string
 
 	terminate chan struct{}
 	done      chan struct{}
+	lastVideoTS time.Time
+	lastAudioTS time.Time
 }
 
 // Log implements logger.Writer.
@@ -74,12 +83,23 @@ func (ri *recorderInstance) initialize() {
 		ri.stream.AddReader(ri.reader)
 	}
 
+	ri.Log(logger.Debug, "new recorder Instance: %s", ri.pathName)
+	ri.splitFlag = 0
+	ri.splitStartTS = time.Now().UnixMilli()
+	ri.lastVideoTS = time.Now()
+	ri.lastAudioTS = time.Now()
+	ri.recordFile = ""
+	ri.game = ""
+	ri.round = ""
+
 	go ri.run()
 }
 
 func (ri *recorderInstance) close() {
 	close(ri.terminate)
 	<-ri.done
+
+	ri.Log(logger.Debug, "close recorderInstance: %s", ri.savepath)
 }
 
 func (ri *recorderInstance) run() {

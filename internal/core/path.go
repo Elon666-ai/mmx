@@ -19,6 +19,8 @@ import (
 	"github.com/bluenviron/mediamtx/internal/recorder"
 	"github.com/bluenviron/mediamtx/internal/staticsources"
 	"github.com/bluenviron/mediamtx/internal/stream"
+	"github.com/bluenviron/mediamtx/worker/models"
+	"github.com/bluenviron/mediamtx/worker/tracer"
 )
 
 func emptyTimer() *time.Timer {
@@ -43,6 +45,8 @@ const (
 	pathOnDemandStateWaitingReady
 	pathOnDemandStateReady
 	pathOnDemandStateClosing
+
+	origNodeReadSkipAuthQuery = "__mmx_origin_pull_skip_auth=1"
 )
 
 type pathAPIPathsListRes struct {
@@ -263,6 +267,9 @@ func (pa *path) run() {
 		pa.onUnDemandHook("path destroyed")
 	}
 
+	tracer.LogDebug(tracer.ID_APP, "path=%s goes offline.", pa.name)
+	models.WorkerPathManager.DeletePath(pa.name)
+	models.SetStreamState(pa.name, 0)
 	pa.Log(logger.Debug, "destroyed: %v", err)
 }
 
@@ -534,6 +541,10 @@ func (pa *path) doAddPublisher(req defs.PathAddPublisherReq) {
 		req.Res <- defs.PathAddPublisherRes{Err: err}
 		return
 	}
+	// pa.name format: live/$tableId-$viewId
+	tracer.LogDebug(tracer.ID_APP, "path=%s goes online.", pa.name)
+	models.WorkerPathManager.AddPaths(pa.name)
+	models.SetStreamState(pa.name, 1)
 
 	req.Author.Log(logger.Info, "is publishing to path '%s', %s",
 		pa.name,
@@ -1055,10 +1066,10 @@ func (pa *path) origNodeStaticSourceStart(query string) {
 		Parent:            pa,
 	}
 	pa.origNodeStaticSource.Initialize()
-	
+
 	// Set pa.source so that setReady can access it
 	pa.source = pa.origNodeStaticSource
-	
+
 	pa.origNodeStaticSourceState = pathOnDemandStateWaitingReady
 	pa.origNodeStaticSourceReadyTimer = time.NewTimer(time.Duration(pa.conf.OrigNodeStartTimeout))
 
@@ -1069,11 +1080,11 @@ func (pa *path) origNodeStaticSourceStart(query string) {
 func (pa *path) buildOrigNodeURL() string {
 	// origNode: srt://host:port
 	// path: camera1
-	// Result: srt://host:port?streamid=read:camera1
+	// Result: srt://host:port?streamid=read:camera1:__mmx_origin_pull_skip_auth=1
 	origNode := pa.conf.OrigNode
 	pathName := pa.name
 
-	return fmt.Sprintf("%s?streamid=read:%s", origNode, pathName)
+	return fmt.Sprintf("%s?streamid=read:%s:%s", origNode, pathName, origNodeReadSkipAuthQuery)
 }
 
 // origNodeStaticSourceScheduleClose schedules closing of origin node source

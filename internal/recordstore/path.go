@@ -249,6 +249,7 @@ func (p *Path) Decode(format string, v string) bool {
 // Encode encodes a path.
 func (p Path) Encode(format string) string {
 	format = strings.ReplaceAll(format, "%path", p.Path)
+	format = strings.ReplaceAll(format, "%vpath", p.Path)
 	format = strings.ReplaceAll(format, "%Y", strconv.FormatInt(int64(p.Start.Year()), 10))
 	format = strings.ReplaceAll(format, "%m", leadingZeros(int(p.Start.Month()), 2))
 	format = strings.ReplaceAll(format, "%d", leadingZeros(p.Start.Day(), 2))

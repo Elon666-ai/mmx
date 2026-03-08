@@ -5,14 +5,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
 	amp4 "github.com/abema/go-mp4"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4/seekablebuffer"
-	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
+	"github.com/bluenviron/mediamtx/worker/tasks"
+	"github.com/bluenviron/mediamtx/worker/tracer"
+	"github.com/bluenviron/mediamtx/worker/utils"
 	"github.com/google/uuid"
 )
 
@@ -54,6 +57,13 @@ func writeInit(
 	return err
 }
 
+/*
+目前MP4文件中的结构是这样的：
+[ftyp][mdat: 视频数据][moov: 元数据]
+默认情况下，moov 是在文件结尾，播放器必须等整个文件加载完，才能播放。
+使用 faststart 后，结构变为：
+[ftyp][moov][mdat]，播放器可以边下边播，适用于网页或流媒体环境（如 HTML5 <video> 标签）。
+*/
 func writeDuration(f io.ReadWriteSeeker, d time.Duration) error {
 	_, err := f.Seek(0, io.SeekStart)
 	if err != nil {
@@ -135,15 +145,18 @@ func (s *formatFMP4Segment) initialize() {
 	s.endDTS = s.startDTS
 }
 
-func (s *formatFMP4Segment) close() error {
-	var err error
+/*
+2026-02-04 17:41:27.122985 closing segment ./nginx/html/20260204/recordings/demo01/h264_720p_1mbps-fwv.20260204174035.mp4, code=round0001-demo01, isUpload=true
+*/
+func (s *formatFMP4Segment) close(code string, isUpload bool) error {
+	var err error = nil
 
 	if s.curPart != nil {
 		err = s.closeCurPart()
 	}
 
 	if s.fi != nil {
-		s.f.ri.Log(logger.Debug, "closing segment %s", s.path)
+		tracer.LogDebug(tracer.ID_APP, "closing segment %s, code=%s, isUpload=%v", s.path, code, isUpload)
 
 		// write overall duration in the header to speed up the playback server
 		duration := s.endDTS - s.startDTS
@@ -160,6 +173,21 @@ func (s *formatFMP4Segment) close() error {
 		if err2 == nil {
 			s.f.ri.onSegmentComplete(s.path, duration)
 		}
+
+		if len(code) > 1 {
+			newpath := utils.GetNewFilepath(s.path, code)
+			tracer.LogDebug(tracer.ID_APP, "movflags: %s --> %s", s.path, newpath)
+			ex := exec.Command("ffmpeg", "-loglevel", "fatal", "-i", s.path, "-movflags", "faststart", "-c", "copy", "-f", "mp4", newpath)
+			err = ex.Run()
+			os.Remove(s.path)
+
+			var dur int = int(time.Now().UnixMilli() - s.f.ri.splitStartTS)
+			fInfo, err := os.Stat(newpath)
+			if isUpload && err == nil && fInfo.Size() > 1024 {
+				tasks.MsgToUploader(utils.S3_UPLOAD_RECORD_FILE, newpath, s.f.ri.game, s.f.ri.round, dur/1000)
+				tracer.LogDebug(tracer.ID_APP, "save-record: %s, size=%d, dur=%d ms", filepath.Base(newpath), fInfo.Size(), dur)
+			}
+		}
 	}
 
 	return err
@@ -168,7 +196,7 @@ func (s *formatFMP4Segment) close() error {
 func (s *formatFMP4Segment) closeCurPart() error {
 	if s.fi == nil {
 		s.path = recordstore.Path{Start: s.startNTP}.Encode(s.f.ri.pathFormat2)
-		s.f.ri.Log(logger.Debug, "creating segment %s", s.path)
+		tracer.LogDebug(tracer.ID_APP, "creating segment %s", s.path)
 
 		err := os.MkdirAll(filepath.Dir(s.path), 0o755)
 		if err != nil {

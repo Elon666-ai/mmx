@@ -286,6 +286,7 @@ func (p *Core) createResources(initial bool) error {
 
 	if initial {
 		p.Log(logger.Info, "MediaMTX %s", version)
+		// tracer.LogDebug(tracer.ID_APP, "MediaMTX %s", version)
 
 		if p.confPath != "" {
 			a, _ := filepath.Abs(p.confPath)
@@ -621,6 +622,12 @@ func (p *Core) createResources(initial bool) error {
 			Metrics:               p.metrics,
 			PathManager:           p.pathManager,
 			Parent:                p,
+			ABREnable:             p.conf.WebRTCABREnable,
+			ABRWSPath:             p.conf.WebRTCABRWSPath,
+			ABRMinBitrate:         p.conf.WebRTCABRMinBitrate,
+			ABRMaxBitrate:         p.conf.WebRTCABRMaxBitrate,
+			ABRDefaultQuality:     p.conf.WebRTCABRDefaultQuality,
+			ABRSwitchThreshold:    p.conf.WebRTCABRSwitchThreshold,
 		}
 		err = i.Initialize()
 		if err != nil {
@@ -1054,4 +1061,8 @@ func (p *Core) APIConfigSet(conf *conf.Conf) {
 	case p.chAPIConfigSet <- conf:
 	case <-p.ctx.Done():
 	}
+}
+
+func (p *Core) GetNodeInfo() (string, int, string, string, string) {
+	return p.conf.WorkerType, p.conf.WorkerId, p.conf.WorkerRegion, p.conf.WorkerMgrAddr, p.conf.WorkerWebrtcBaseUrl
 }

@@ -28,6 +28,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/externalcmd"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/webrtc"
+	"github.com/bluenviron/mediamtx/internal/protocols/websocket"
 	"github.com/bluenviron/mediamtx/internal/restrictnetwork"
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
@@ -222,6 +223,15 @@ type Server struct {
 	PathManager           serverPathManager
 	Parent                serverParent
 
+	// ABR WebSocket server
+	ABREnable          bool
+	ABRWSPath          string
+	ABRMinBitrate      int
+	ABRMaxBitrate      int
+	ABRDefaultQuality  string
+	ABRSwitchThreshold float64
+	abrWSServer        *websocket.ABRServer
+
 	ctx              context.Context
 	ctxCancel        func()
 	httpServer       *httpServer
@@ -265,16 +275,22 @@ func (s *Server) Initialize() error {
 	s.done = make(chan struct{})
 
 	s.httpServer = &httpServer{
-		address:        s.Address,
-		encryption:     s.Encryption,
-		serverKey:      s.ServerKey,
-		serverCert:     s.ServerCert,
-		allowOrigins:   s.AllowOrigins,
-		trustedProxies: s.TrustedProxies,
-		readTimeout:    s.ReadTimeout,
-		writeTimeout:   s.WriteTimeout,
-		pathManager:    s.PathManager,
-		parent:         s,
+		address:            s.Address,
+		encryption:         s.Encryption,
+		serverKey:          s.ServerKey,
+		serverCert:         s.ServerCert,
+		allowOrigins:       s.AllowOrigins,
+		trustedProxies:     s.TrustedProxies,
+		readTimeout:        s.ReadTimeout,
+		writeTimeout:       s.WriteTimeout,
+		pathManager:        s.PathManager,
+		parent:             s,
+		abrEnable:          s.ABREnable,
+		abrWSPath:          s.ABRWSPath,
+		abrMinBitrate:      s.ABRMinBitrate,
+		abrMaxBitrate:      s.ABRMaxBitrate,
+		abrDefaultQuality:  s.ABRDefaultQuality,
+		abrSwitchThreshold: s.ABRSwitchThreshold,
 	}
 	err := s.httpServer.initialize()
 	if err != nil {
@@ -335,6 +351,13 @@ func (s *Server) Initialize() error {
 		s.Metrics.SetWebRTCServer(s)
 	}
 
+	// Start ABR WebSocket server if enabled
+	if s.ABREnable {
+		if err := s.initializeABRWebSocket(); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -349,6 +372,10 @@ func (s *Server) Close() {
 
 	if !interfaceIsEmpty(s.Metrics) {
 		s.Metrics.SetWebRTCServer(nil)
+	}
+
+	if s.abrWSServer != nil {
+		s.abrWSServer.Close()
 	}
 
 	s.ctxCancel()
@@ -663,4 +690,215 @@ func (s *Server) APISessionsKick(uuid uuid.UUID) error {
 	case <-s.ctx.Done():
 		return fmt.Errorf("terminated")
 	}
+}
+
+// findSessionByID finds a session by its ID (secret UUID string).
+func (s *Server) findSessionByID(sessionID string) *session {
+	// Parse UUID from string
+	secret, err := uuid.Parse(sessionID)
+	if err != nil {
+		s.Log(logger.Warn, "invalid session ID format: %s", sessionID)
+		return nil
+	}
+
+	s.Log(logger.Debug, "Looking up session by secret UUID: %s", sessionID)
+
+	// Try to find in the map
+	// The sessionsBySecret map is populated when session is created
+	// and removed when session is deleted
+
+	// Since we don't have direct access with thread safety here,
+	// we'll iterate through sessions
+	sessionCount := 0
+	for sess := range s.sessions {
+		sessionCount++
+		if sess.secret == secret {
+			s.Log(logger.Debug, "Found session %s for secret %s", sess.uuid, sessionID)
+			return sess
+		}
+	}
+
+	s.Log(logger.Warn, "Session not found: %s (searched through %d active sessions)", sessionID, sessionCount)
+	return nil
+}
+
+func (s *Server) initializeABRWebSocket() error {
+	abrServer, err := websocket.NewABRServer(s.ABRWSPath, s, s)
+	if err != nil {
+		return err
+	}
+
+	s.abrWSServer = abrServer
+
+	if err := s.abrWSServer.Start(); err != nil {
+		return err
+	}
+
+	s.Log(logger.Info, "[ABR] WebSocket server started: %s", s.ABRWSPath)
+
+	return nil
+}
+
+// OnABRMessage handles ABR control messages
+func (s *Server) OnABRMessage(sessionID string, msg *websocket.ABRMessage) error {
+	session := s.findSessionByID(sessionID)
+	if session == nil {
+		s.Log(logger.Error, "OnABRMessage failed: session not found: %s", sessionID)
+		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	switch msg.Type {
+	case "SWITCH_QUALITY":
+		// Parse quality as track ID (integer)
+		trackID, ok := msg.Data.(float64)
+		if !ok {
+			s.Log(logger.Error, "Invalid SWITCH_QUALITY data: expected number, got %T", msg.Data)
+			return fmt.Errorf("invalid track ID in SWITCH_QUALITY message")
+		}
+
+		s.Log(logger.Info, "Switching quality for session %s to track %d", sessionID, int(trackID))
+
+		if err := session.SwitchVideoTrack(int(trackID)); err != nil {
+			s.Log(logger.Error, "Failed to switch track for session %s: %v", sessionID, err)
+			return fmt.Errorf("failed to switch track: %w", err)
+		}
+
+		s.Log(logger.Info, "Successfully switched quality for session %s to track %d", sessionID, int(trackID))
+		return nil
+
+	default:
+		s.Log(logger.Warn, "Unknown ABR message type: %s", msg.Type)
+		return fmt.Errorf("unknown message type: %s", msg.Type)
+	}
+}
+
+// GetSessionTracks returns available tracks for a session
+func (s *Server) GetSessionTracks(sessionID string) ([]websocket.TrackInfo2, error) {
+	session := s.findSessionByID(sessionID)
+	if session == nil {
+		s.Log(logger.Error, "GetSessionTracks failed: session not found: %s", sessionID)
+		return nil, fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// Get tracks info from session
+	tracksInfo := session.GetTracksInfo()
+	return tracksInfo.Tracks, nil
+}
+
+// GetPathTracks gets track information from a path by finding existing sessions
+// This avoids needing PathManager.Describe which doesn't exist in serverPathManager
+func (s *Server) GetPathTracks(pathName string) ([]websocket.TrackInfo2, error) {
+	s.Log(logger.Info, "[ABR] Getting tracks for path: %s", pathName)
+
+	// Find any active session reading from this path
+	var targetSession *session
+	sessionCount := 0
+
+	for sess := range s.sessions {
+		sessionCount++
+		// Compare with req.pathName
+		if sess.req.pathName == pathName {
+			targetSession = sess
+			s.Log(logger.Info, "[ABR] Found session %s reading from path %s", sess.uuid, pathName)
+			break
+		}
+	}
+
+	s.Log(logger.Debug, "[ABR] Searched through %d sessions", sessionCount)
+
+	if targetSession == nil {
+		s.Log(logger.Warn, "[ABR] No active session found for path: %s, using default tracks", pathName)
+		// Return default simulcast tracks
+		return s.getDefaultTracks(), nil
+	}
+
+	// Get tracks info from the session
+	// This will trigger lazy loading if needed
+	tracksInfo := targetSession.GetTracksInfo()
+
+	if len(tracksInfo.Tracks) == 0 {
+		s.Log(logger.Warn, "[ABR] Session found but no tracks available, using defaults")
+		return s.getDefaultTracks(), nil
+	}
+
+	s.Log(logger.Info, "[ABR] Retrieved %d tracks from path %s via session %s",
+		len(tracksInfo.Tracks), pathName, targetSession.uuid)
+	return tracksInfo.Tracks, nil
+}
+
+// getDefaultTracks returns default simulcast + audio track configuration
+// This is used when no active session is found or as a fallback
+func (s *Server) getDefaultTracks() []websocket.TrackInfo2 {
+	s.Log(logger.Debug, "[ABR] Using default track configuration (3 video + 1 audio)")
+	return []websocket.TrackInfo2{
+		{
+			ID:      0,
+			Type:    "video",
+			Codec:   "h264",
+			Label:   "High",
+			Bitrate: 2000000, // 2 Mbps
+			Width:   1920,
+			Height:  1080,
+		},
+		{
+			ID:      1,
+			Type:    "video",
+			Codec:   "h264",
+			Label:   "Medium",
+			Bitrate: 1000000, // 1 Mbps
+			Width:   1280,
+			Height:  720,
+		},
+		{
+			ID:      2,
+			Type:    "video",
+			Codec:   "h264",
+			Label:   "Low",
+			Bitrate: 400000, // 400 kbps
+			Width:   960,
+			Height:  540,
+		},
+		{
+			ID:      3,
+			Type:    "audio",
+			Codec:   "opus",
+			Label:   "Audio",
+			Bitrate: 128000, // 128 kbps
+			Width:   0,
+			Height:  0,
+		},
+	}
+}
+
+// Helper functions for quality labels and bitrates
+func (s *Server) getQualityLabel(trackID int) string {
+	labels := []string{"High", "Medium", "Low"}
+	if trackID < len(labels) {
+		return labels[trackID]
+	}
+	return fmt.Sprintf("Track%d", trackID)
+}
+
+func (s *Server) getBitrateForQuality(trackID int) int {
+	bitrates := []int{2000000, 1000000, 400000} // 2 Mbps, 1 Mbps, 400 kbps
+	if trackID < len(bitrates) {
+		return bitrates[trackID]
+	}
+	return 1000000
+}
+
+func (s *Server) getWidthForQuality(trackID int) int {
+	widths := []int{1920, 1280, 960}
+	if trackID < len(widths) {
+		return widths[trackID]
+	}
+	return 1280
+}
+
+func (s *Server) getHeightForQuality(trackID int) int {
+	heights := []int{1080, 720, 540}
+	if trackID < len(heights) {
+		return heights[trackID]
+	}
+	return 720
 }

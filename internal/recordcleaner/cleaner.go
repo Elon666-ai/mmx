@@ -12,6 +12,9 @@ import (
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/recordstore"
+	"github.com/bluenviron/mediamtx/worker/tracer"
+	"github.com/bluenviron/mediamtx/worker/utils"
+	"github.com/shirou/gopsutil/disk"
 )
 
 var timeNow = time.Now
@@ -26,6 +29,9 @@ type Cleaner struct {
 
 	chReloadConf chan map[string]*conf.Path
 	done         chan struct{}
+
+	AdditionalCleanTime conf.Duration
+	CheckInterval       time.Duration
 }
 
 // Initialize initializes a Cleaner.
@@ -58,7 +64,7 @@ func (c *Cleaner) ReloadPathConfs(pathConfs map[string]*conf.Path) {
 
 func (c *Cleaner) run() {
 	defer close(c.done)
-
+	tracer.LogInfo(tracer.ID_APP, "cleaner cleanInterval=%v", c.cleanInterval())
 	c.doRun() //nolint:errcheck
 
 	for {
@@ -76,7 +82,7 @@ func (c *Cleaner) run() {
 }
 
 func (c *Cleaner) cleanInterval() time.Duration {
-	interval := 30 * 60 * time.Second
+	interval := 5 * 60 * time.Second
 
 	for _, e := range c.PathConfs {
 		if e.RecordDeleteAfter != 0 &&
@@ -103,14 +109,15 @@ func (c *Cleaner) processPath(now time.Time, pathName string) error {
 	if err != nil {
 		return err
 	}
-
+	tracer.LogDebug(tracer.ID_APP, "cleaning pathName=%s, RecordDeleteAfter=%vh", pathName, pathConf.RecordDeleteAfter/conf.Duration(time.Hour))
 	if pathConf.RecordDeleteAfter == 0 {
 		return nil
 	}
 
 	err = c.deleteExpiredSegments(now, pathName, pathConf)
 	if err != nil {
-		return err
+		tracer.LogTrace(tracer.ID_APP, "cleaner deleteExpiredSegments err=%v", err)
+		//return err
 	}
 
 	c.deleteEmptyDirs(pathConf)
@@ -137,15 +144,59 @@ func (c *Cleaner) deleteEmptyDirs(pathConf *conf.Path) {
 	recordPath := strings.ReplaceAll(pathConf.RecordPath, "%path", pathConf.Name)
 	commonPath := recordstore.CommonPath(recordPath)
 
-	filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error { //nolint:errcheck
+	now := timeNow()
+	tracer.LogDebug(tracer.ID_APP, "cleaner walks %s", commonPath)
+	diskInfo, err := disk.Usage(commonPath)
+	if err != nil {
+		return
+	}
+
+	tracer.LogInfo(tracer.ID_APP, "%s disk usage =%0.2f%%", commonPath, diskInfo.UsedPercent)
+	if diskInfo.UsedPercent >= 90 {
+		c.AdditionalCleanTime = conf.Duration(5 * time.Minute)
+		c.CheckInterval = 1 * 60 * time.Second
+	} else if diskInfo.UsedPercent > 85 {
+		c.AdditionalCleanTime = conf.Duration(35 * time.Minute)
+		c.CheckInterval = 1 * 60 * time.Second
+	} else if diskInfo.UsedPercent > 80 {
+		c.AdditionalCleanTime = conf.Duration(65 * time.Minute)
+		c.CheckInterval = 2 * 60 * time.Second
+	} else if diskInfo.UsedPercent > 70 {
+		c.AdditionalCleanTime = conf.Duration(95 * time.Minute)
+		c.CheckInterval = 2 * 60 * time.Second
+	} else {
+		c.AdditionalCleanTime = pathConf.RecordDeleteAfter
+		c.CheckInterval = 3 * 60 * time.Second
+	}
+	deleteAfterMinutes := c.AdditionalCleanTime / conf.Duration(time.Minute)
+	tracer.LogInfo(tracer.ID_APP, "DeleteAfter=%v minutes.", deleteAfterMinutes)
+
+	filepath.Walk(commonPath, func(fpath string, info fs.FileInfo, err error) error { //nolint:errcheck
 		if err != nil {
 			return err
 		}
-
-		if info.IsDir() {
-			os.Remove(fpath)
+		if !info.IsDir() {
+			if now.Sub(info.ModTime()) > time.Duration(deleteAfterMinutes*conf.Duration(time.Minute)) {
+				if utils.IsMP4(fpath) || utils.IsFLV(fpath) {
+					tracer.LogDebug(tracer.ID_APP, "cleaner removing file: %s", fpath)
+					os.Remove(fpath)
+				}
+			}
 		}
 
 		return nil
 	})
+
+	// filepath.WalkDir(commonPath, func(fpath string, info fs.DirEntry, err error) error { //nolint:errcheck
+	// 	if err != nil {
+	// 		return err
+	// 	}
+
+	// 	if info.IsDir() && fpath != commonPath && utils.IsDirEmpty(fpath) {
+	// 		tracer.LogDebug(tracer.ID_APP, "removing dir: %s", fpath)
+	// 		os.Remove(fpath)
+	// 	}
+
+	// 	return nil
+	// })
 }

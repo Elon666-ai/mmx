@@ -2,6 +2,7 @@ package srt
 
 import (
 	"bufio"
+	"fmt"
 	"testing"
 	"time"
 
@@ -275,5 +276,58 @@ func TestServerRead(t *testing.T) {
 		if received {
 			break
 		}
+	}
+}
+
+func TestServerReadSkipAuthForOriginPull(t *testing.T) {
+	externalCmdPool := &externalcmd.Pool{}
+	externalCmdPool.Initialize()
+	defer externalCmdPool.Close()
+
+	reqReceived := make(chan defs.PathAddReaderReq, 1)
+
+	pathManager := &test.PathManager{
+		AddReaderImpl: func(req defs.PathAddReaderReq) (defs.Path, *stream.Stream, error) {
+			reqReceived <- req
+			return nil, nil, fmt.Errorf("stop")
+		},
+	}
+
+	s := &Server{
+		Address:             "127.0.0.1:8890",
+		RTSPAddress:         "",
+		ReadTimeout:         conf.Duration(10 * time.Second),
+		WriteTimeout:        conf.Duration(10 * time.Second),
+		UDPMaxPayloadSize:   1472,
+		RunOnConnect:        "",
+		RunOnConnectRestart: false,
+		RunOnDisconnect:     "string",
+		ExternalCmdPool:     externalCmdPool,
+		PathManager:         pathManager,
+		Parent:              test.NilLogger,
+	}
+	err := s.Initialize()
+	require.NoError(t, err)
+	defer s.Close()
+
+	u := "srt://127.0.0.1:8890?streamid=read:teststream:__mmx_origin_pull_skip_auth=1"
+
+	srtConf := srt.DefaultConfig()
+	address, err := srtConf.UnmarshalURL(u)
+	require.NoError(t, err)
+
+	err = srtConf.Validate()
+	require.NoError(t, err)
+
+	_, _ = srt.Dial("srt", address, srtConf)
+
+	select {
+	case req := <-reqReceived:
+		require.Equal(t, "teststream", req.AccessRequest.Name)
+		require.Equal(t, "__mmx_origin_pull_skip_auth=1", req.AccessRequest.Query)
+		require.True(t, req.AccessRequest.SkipAuth)
+
+	case <-time.After(2 * time.Second):
+		t.Fatal("path manager AddReader was not called")
 	}
 }

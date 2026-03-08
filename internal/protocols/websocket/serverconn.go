@@ -1,4 +1,3 @@
-// Package websocket provides WebSocket connectivity.
 package websocket
 
 import (
@@ -8,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/gorilla/websocket"
+	gws "github.com/gorilla/websocket"
 )
 
 var (
@@ -17,7 +16,7 @@ var (
 	writeTimeout = 2 * time.Second
 )
 
-var upgrader = websocket.Upgrader{
+var upgrader2 = gws.Upgrader{
 	CheckOrigin: func(_ *http.Request) bool {
 		return true
 	},
@@ -26,7 +25,7 @@ var upgrader = websocket.Upgrader{
 // ServerConn is a server-side WebSocket connection with
 // automatic, periodic ping-pong
 type ServerConn struct {
-	wc *websocket.Conn
+	wc *gws.Conn
 
 	// in
 	terminate chan struct{}
@@ -38,7 +37,7 @@ type ServerConn struct {
 
 // NewServerConn allocates a ServerConn.
 func NewServerConn(w http.ResponseWriter, req *http.Request) (*ServerConn, error) {
-	wc, err := upgrader.Upgrade(w, req, nil)
+	wc, err := upgrader2.Upgrade(w, req, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -81,12 +80,12 @@ func (c *ServerConn) run() {
 		select {
 		case byts := <-c.write:
 			c.wc.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck
-			err := c.wc.WriteMessage(websocket.TextMessage, byts)
+			err := c.wc.WriteMessage(gws.TextMessage, byts)
 			c.writeErr <- err
 
 		case <-pingTicker.C:
 			c.wc.SetWriteDeadline(time.Now().Add(writeTimeout)) //nolint:errcheck
-			c.wc.WriteMessage(websocket.PingMessage, nil)       //nolint:errcheck
+			c.wc.WriteMessage(gws.PingMessage, nil)             //nolint:errcheck
 
 		case <-c.terminate:
 			return
