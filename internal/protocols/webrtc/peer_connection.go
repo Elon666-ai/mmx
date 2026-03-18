@@ -741,6 +741,51 @@ func (co *PeerConnection) CreateFullAnswer(offer *webrtc.SessionDescription) (*w
 	return answer, nil
 }
 
+// Renegotiate performs SDP renegotiation for track switching
+func (co *PeerConnection) Renegotiate(offer *webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
+	// Set the remote offer
+	err := co.wr.SetRemoteDescription(*offer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set remote description: %v", err)
+	}
+
+	// Create new answer
+	tmp, err := co.wr.CreateAnswer(nil)
+	if err != nil {
+		if errors.Is(err, webrtc.ErrSenderWithNoCodecs) {
+			return nil, fmt.Errorf("codecs not supported by client")
+		}
+		return nil, fmt.Errorf("failed to create answer: %v", err)
+	}
+	answer := &tmp
+
+	// Set local description
+	err = co.wr.SetLocalDescription(*answer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set local description: %v", err)
+	}
+
+	// Wait for ICE gathering
+	err = co.waitGatheringDone()
+	if err != nil {
+		return nil, fmt.Errorf("failed to wait for ICE gathering: %v", err)
+	}
+
+	// Get the final answer
+	answer = co.wr.LocalDescription()
+	if answer == nil {
+		return nil, fmt.Errorf("no local description available")
+	}
+
+	// Filter the answer
+	answer, err = co.filterLocalDescription(answer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to filter answer: %v", err)
+	}
+
+	return answer, nil
+}
+
 func (co *PeerConnection) waitGatheringDone() error {
 	for {
 		select {

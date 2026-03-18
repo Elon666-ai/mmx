@@ -40,6 +40,7 @@ type Server struct {
 	ServerKey    string
 	Handler      http.Handler
 	Parent       logger.Writer
+	PreHandler   func(http.ResponseWriter, *http.Request) bool // PreHandler for early request interception
 
 	ln     net.Listener
 	inner  *http.Server
@@ -104,8 +105,8 @@ func (s *Server) Initialize() error {
 	h = &handlerOrigin{h, s.AllowOrigins}
 	h = &handlerServerHeader{h}
 	h = &handlerFilterRequests{h}
-	h = &handlerLogger{h, s.Parent}
 	h = &handlerExitOnPanic{h}
+	h = &handlerLogger{h, s.Parent}
 	h = &handlerWriteTimeout{h, s.WriteTimeout}
 
 	s.inner = &http.Server{
@@ -139,4 +140,17 @@ func (s *Server) Close() {
 	if s.loader != nil {
 		s.loader.Close()
 	}
+}
+
+// preHandler intercepts requests before they reach the main handler chain
+type preHandler struct {
+	pre  func(http.ResponseWriter, *http.Request) bool
+	next http.Handler
+}
+
+func (h *preHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if h.pre != nil && h.pre(w, r) {
+		return // Request was handled by preHandler
+	}
+	h.next.ServeHTTP(w, r)
 }

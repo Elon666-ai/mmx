@@ -423,6 +423,25 @@ webrtcTrackGatherTimeout: 2s
 webrtcSTUNGatherTimeout: 5s
 
 ###############################################
+# Global settings -> WebRTC ABR Control
+
+# Enable Adaptive Bitrate (ABR) control via WebSocket.
+# ABR allows dynamic quality switching based on network conditions.
+webrtcABREnable: yes
+# WebSocket control path for ABR messages.
+# Clients connect to ws://<server>:<port><webrtcABRWSPath>?session_id=<session_id>
+webrtcABRWSPath: /ws
+# Minimum bitrate in kbps for the lowest quality track.
+webrtcABRMinBitrate: 500
+# Maximum bitrate in kbps for the highest quality track.
+webrtcABRMaxBitrate: 5000
+# Default quality level: high, medium, or low.
+webrtcABRDefaultQuality: high
+# Time threshold in seconds before allowing another quality switch.
+# This prevents rapid switching that could degrade user experience.
+webrtcABRSwitchThreshold: 2.0
+
+###############################################
 # Global settings -> SRT server
 
 # Enable publishing and reading streams with the SRT protocol.

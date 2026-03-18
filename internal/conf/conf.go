@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"reflect"
 	"slices"
@@ -150,6 +151,12 @@ var defaultAuthInternalUsers = AuthInternalUsers{
 // WARNING: Avoid using slices directly due to https://github.com/golang/go/issues/21092
 type Conf struct {
 	// General
+	WorkerType          string `json:"workerType"`
+	WorkerId            int    `json:"workerId"`
+	WorkerRegion        string `json:"workerRegion"`
+	WorkerMgrAddr       string `json:"workerMgrAddr"`
+	WorkerWebrtcBaseUrl string `json:"workerWebrtcBaseUrl"`
+
 	LogLevel            LogLevel        `json:"logLevel"`
 	LogDestinations     LogDestinations `json:"logDestinations"`
 	LogStructured       bool            `json:"logStructured"`
@@ -295,6 +302,14 @@ type Conf struct {
 	WebRTCICEHostNAT1To1IPs     *[]string        `json:"webrtcICEHostNAT1To1IPs,omitempty"` // deprecated
 	WebRTCICEServers            *[]string        `json:"webrtcICEServers,omitempty"`        // deprecated
 
+	// WebRTC ABR (Adaptive Bitrate) Control
+	WebRTCABREnable          bool    `json:"webrtcABREnable"`
+	WebRTCABRWSPath          string  `json:"webrtcABRWSPath"`
+	WebRTCABRMinBitrate      int     `json:"webrtcABRMinBitrate"`
+	WebRTCABRMaxBitrate      int     `json:"webrtcABRMaxBitrate"`
+	WebRTCABRDefaultQuality  string  `json:"webrtcABRDefaultQuality"`
+	WebRTCABRSwitchThreshold float64 `json:"webrtcABRSwitchThreshold"`
+
 	// SRT server
 	SRT        bool   `json:"srt"`
 	SRTAddress string `json:"srtAddress"`
@@ -317,6 +332,10 @@ type Conf struct {
 
 func (conf *Conf) setDefaults() {
 	// General
+	conf.WorkerType = "origin"
+	conf.WorkerId = 1
+	conf.WorkerRegion = "Manila"
+	conf.WorkerMgrAddr = "ws://localhost:8090/ws/mmx"
 	conf.LogLevel = LogLevel(logger.Info)
 	conf.LogDestinations = LogDestinations{logger.DestinationStdout}
 	conf.LogStructured = false
@@ -424,6 +443,14 @@ func (conf *Conf) setDefaults() {
 	conf.WebRTCHandshakeTimeout = 10 * Duration(time.Second)
 	conf.WebRTCTrackGatherTimeout = 2 * Duration(time.Second)
 	conf.WebRTCSTUNGatherTimeout = 5 * Duration(time.Second)
+
+	// WebRTC ABR (Adaptive Bitrate) Control
+	conf.WebRTCABREnable = false
+	conf.WebRTCABRWSPath = "ws://localhost:8810/ws/control"
+	conf.WebRTCABRMinBitrate = 300  // 500 kbps
+	conf.WebRTCABRMaxBitrate = 3000 // 5000 kbps
+	conf.WebRTCABRDefaultQuality = "high"
+	conf.WebRTCABRSwitchThreshold = 3.0 // 2 seconds
 
 	// SRT server
 	conf.SRT = true
@@ -788,6 +815,20 @@ func (conf *Conf) Validate(l logger.Writer) error {
 		conf.WebRTCAllowOrigins = []string{*conf.WebRTCAllowOrigin}
 	}
 
+	if conf.WebRTCABREnable {
+		// Validate WebSocket URL
+		u, err := url.Parse(conf.WebRTCABRWSPath)
+		if err != nil {
+			return fmt.Errorf("invalid webrtcABRWSPath: %v", err)
+		}
+
+		if u.Scheme != "ws" && u.Scheme != "wss" {
+			return fmt.Errorf("webrtcABRWSPath must use ws:// or wss://, %s", u.Scheme)
+		}
+		if conf.WebRTCABRMinBitrate <= 0 || conf.WebRTCABRMaxBitrate <= 0 || conf.WebRTCABRMinBitrate >= conf.WebRTCABRMaxBitrate || conf.WebRTCABRSwitchThreshold <= 0 {
+			return fmt.Errorf("WebRTCABRMinBitrate/WebRTCABRMaxBitrate/WebRTCABRSwitchThreshold must be greater than zero")
+		}
+	}
 	// Record (deprecated)
 
 	if conf.Record != nil {

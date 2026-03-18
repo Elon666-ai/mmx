@@ -59,7 +59,6 @@ mmx 旨在解决以下问题：
 
 ## 🏗️ 架构设计思路（High-Level Architecture）
 
-```
 
 ```
        ┌─────────────┐
@@ -75,7 +74,7 @@ mmx 旨在解决以下问题：
       └───────┬───────┘
               │
  ┌────────────┼─────────────┐
- │            │             │
+
 ```
 
 ┌────▼────┐  ┌────▼────┐  ┌─────▼─────┐
@@ -166,13 +165,10 @@ mmx 在遵循原项目 License 的前提下，进行了功能扩展与工程化�
 **recordings**: http://8.220.177.159/mmx/
 
 
----
+* **Issue / Wiki**: GitHub Wiki
+* **Community (Discord)**: [https://discord.gg/6cubxZeyh](https://discord.gg/6cubxZeyh)
+* **Email**: [91amor9119@gmail.com](mailto:91amor9119@gmail.com)
+* **WhatsApp Group**: ![MMX-saas-admin](whatsapp-MMX.png)
 
-## 📫 联系方式
-
-- Issue: wiki
-- Discussion: https://discord.gg/6cubxZeyh
-- Email: 91amor9119@gmail.com
-```
 
 ---

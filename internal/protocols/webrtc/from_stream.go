@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
+	// "time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
@@ -55,15 +55,15 @@ func randUint32() (uint32, error) {
 	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3]), nil
 }
 
-func multiplyAndDivide2(v, m, d time.Duration) time.Duration {
-	secs := v / d
-	dec := v % d
-	return (secs*m + dec*m/d)
-}
+// func multiplyAndDivide2(v, m, d time.Duration) time.Duration {
+// 	secs := v / d
+// 	dec := v % d
+// 	return (secs*m + dec*m/d)
+// }
 
-func timestampToDuration(t int64, clockRate int) time.Duration {
-	return multiplyAndDivide2(time.Duration(t), time.Second, time.Duration(clockRate))
-}
+// func timestampToDuration(t int64, clockRate int) time.Duration {
+// 	return multiplyAndDivide2(time.Duration(t), time.Second, time.Duration(clockRate))
+// }
 
 func setupVideoTrack(
 	desc *description.Session,
@@ -281,33 +281,6 @@ func setupVideoTrack(
 		}
 		pc.OutgoingTracks = append(pc.OutgoingTracks, track)
 
-		// Configure simulcast if path has simulcast config
-		if pathConf != nil {
-			conf := pathConf.SafeConf()
-			if conf != nil && conf.SimulcastConfig != nil && conf.SimulcastConfig.Enable {
-				encodings := make([]webrtc.RTPEncodingParameters, 0)
-				for _, input := range conf.SimulcastConfig.Inputs {
-					if input.Type == "video" && input.Layer != "" {
-						ssrc, err := randUint32()
-						if err != nil {
-							return nil, fmt.Errorf("failed to generate SSRC for layer %s: %w", input.Layer, err)
-						}
-						encodings = append(encodings, webrtc.RTPEncodingParameters{
-							RTPCodingParameters: webrtc.RTPCodingParameters{
-								RID:  input.Layer,
-								SSRC: webrtc.SSRC(ssrc),
-							},
-						})
-					}
-				}
-				if len(encodings) > 0 {
-					err := track.ConfigureSimulcast(encodings)
-					if err != nil {
-						return nil, fmt.Errorf("failed to configure simulcast: %w", err)
-					}
-				}
-			}
-		}
 
 		encoder := &rtph264.Encoder{
 			PayloadType:    96,
@@ -322,24 +295,8 @@ func setupVideoTrack(
 		var lastPTS int64
 
 		// Determine which RID to use for this track
-		// For simulcast, we need to determine which layer this stream represents
-		// This will be handled by the simulcast source when writing packets
+		// RID is no longer used since simulcast config is removed
 		var currentRID string
-		if pathConf != nil {
-			conf := pathConf.SafeConf()
-			if conf != nil && conf.SimulcastConfig != nil && conf.SimulcastConfig.Enable {
-				// For simulcast, the source will handle RID selection
-				// We'll use the first layer as default
-				if len(conf.SimulcastConfig.Inputs) > 0 {
-					for _, input := range conf.SimulcastConfig.Inputs {
-						if input.Type == "video" && input.Layer != "" {
-							currentRID = input.Layer
-							break
-						}
-					}
-				}
-			}
-		}
 
 		r.OnData(
 			media,

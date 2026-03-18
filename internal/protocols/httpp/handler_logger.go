@@ -1,8 +1,10 @@
 package httpp
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httputil"
 
@@ -30,6 +32,14 @@ func (w *loggerWriter) Write(b []byte) (int, error) {
 func (w *loggerWriter) WriteHeader(statusCode int) {
 	w.status = statusCode
 	w.w.WriteHeader(statusCode)
+}
+
+// Hijack implements http.Hijacker interface for WebSocket support.
+func (w *loggerWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := w.w.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, fmt.Errorf("ResponseWriter does not implement http.Hijacker")
 }
 
 func (w *loggerWriter) dump() string {

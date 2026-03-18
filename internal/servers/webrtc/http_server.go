@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	wsprotocol "github.com/bluenviron/mediamtx/internal/protocols/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
@@ -83,6 +84,14 @@ type httpServer struct {
 	writeTimeout   conf.Duration
 	pathManager    serverPathManager
 	parent         *Server
+
+	// ABR configuration
+	abrEnable          bool
+	abrWSPath          string
+	abrMinBitrate      int
+	abrMaxBitrate      int
+	abrDefaultQuality  string
+	abrSwitchThreshold float64
 
 	inner *httpp.Server
 }
@@ -408,6 +417,14 @@ func (s *httpServer) middlewarePreflightRequests(ctx *gin.Context) {
 }
 
 func (s *httpServer) onRequest(ctx *gin.Context) {
+	// WebSocket control channel for ABR - handle before other middleware
+	// This must be done early to avoid ResponseWriter wrapping issues
+	if s.abrEnable && ctx.Request.URL.Path == s.abrWSPath {
+		s.onWSControl(ctx)
+		ctx.Abort() // Prevent further middleware processing
+		return
+	}
+
 	if strings.HasSuffix(ctx.Request.URL.Path, "/publisher.js") {
 		ctx.Header("Cache-Control", "max-age=3600")
 		ctx.Header("Content-Type", "application/javascript")
@@ -477,5 +494,104 @@ func (s *httpServer) onRequest(ctx *gin.Context) {
 			}
 		}
 		return
+	}
+}
+
+// onWSControl handles WebSocket control requests for ABR.
+func (s *httpServer) onWSControl(ctx *gin.Context) {
+	// 1. Get session_id parameter
+	sessionID := ctx.Query("session_id")
+	if sessionID == "" {
+		writeError(ctx, http.StatusBadRequest, fmt.Errorf("missing session_id parameter"))
+		return
+	}
+
+	s.parent.Log(logger.Info, "WebSocket control request for session: %s", sessionID)
+
+	// 2. Find the corresponding WebRTC Session
+	session := s.parent.findSessionByID(sessionID)
+	if session == nil {
+		s.parent.Log(logger.Error, "WebSocket control request failed: session not found: %s", sessionID)
+		writeError(ctx, http.StatusNotFound, fmt.Errorf("session not found: %s", sessionID))
+		return
+	}
+
+	// Verify session is still active and healthy
+	if session.ctx.Err() != nil {
+		s.parent.Log(logger.Error, "WebSocket control request failed: session %s is no longer active", sessionID)
+		writeError(ctx, http.StatusGone, fmt.Errorf("session is no longer active: %s", sessionID))
+		return
+	}
+
+	if !session.isHealthy() {
+		s.parent.Log(logger.Error, "WebSocket control request failed: session %s is not healthy", sessionID)
+		writeError(ctx, http.StatusServiceUnavailable, fmt.Errorf("session is not ready: %s", sessionID))
+		return
+	}
+
+	// 3. Upgrade to WebSocket
+	// CRITICAL: Use the underlying http.ResponseWriter from gin.Context
+	// to avoid Hijacker interface issues with gin's responseWriter wrapper.
+	// We need to get the original ResponseWriter that was passed to the handler.
+	var w http.ResponseWriter
+
+	// Try to get the underlying ResponseWriter from gin
+	// gin stores it in ctx.Writer, but we need to check if it implements Hijacker
+	if _, ok := ctx.Writer.(http.Hijacker); ok {
+		// If ctx.Writer itself implements Hijacker, use it directly
+		w = ctx.Writer
+	} else {
+		// Otherwise, we need to abort the gin context and manually handle the response
+		// This is necessary because gin's responseWriter might not properly forward Hijack
+		ctx.Status(http.StatusSwitchingProtocols)
+		ctx.Writer.Flush()
+
+		// Get the underlying connection
+		hijacker, ok := ctx.Writer.(http.Hijacker)
+		if !ok {
+			s.parent.Log(logger.Error, "WebSocket upgrade failed: ResponseWriter does not implement http.Hijacker")
+			return
+		}
+
+		// Hijack the connection directly
+		netConn, _, err := hijacker.Hijack()
+		if err != nil {
+			s.parent.Log(logger.Error, "WebSocket upgrade failed during Hijack: %v", err)
+			return
+		}
+		defer netConn.Close()
+
+		// Manually perform WebSocket upgrade
+		// This is a workaround - we'll use the standard upgrader but with the raw connection
+		s.parent.Log(logger.Error, "WebSocket upgrade requires Hijacker - cannot proceed with current setup")
+		return
+	}
+
+	conn, err := wsprotocol.NewServerConn(w, ctx.Request)
+	if err != nil {
+		s.parent.Log(logger.Error, "WebSocket upgrade failed: %v", err)
+		return
+	}
+
+	s.parent.Log(logger.Info, "WebSocket connection established for session: %s", sessionID)
+
+	// 4. Create WebSocket control connection
+	wsConn := NewWSControlConnection(conn, session)
+	session.SetWSConnection(wsConn)
+
+	// 5. Send initial TRACKS_INFO with retry logic
+	maxRetries := 3
+	for i := 0; i < maxRetries; i++ {
+		if err := wsConn.SendTracksInfo(); err != nil {
+			s.parent.Log(logger.Warn, "Failed to send tracks info (attempt %d/%d): %v", i+1, maxRetries, err)
+			if i < maxRetries-1 {
+				time.Sleep(time.Duration(i+1) * 100 * time.Millisecond) // Exponential backoff
+				continue
+			}
+			s.parent.Log(logger.Error, "Failed to send tracks info after %d attempts: %v", maxRetries, err)
+		} else {
+			s.parent.Log(logger.Info, "Successfully sent initial tracks info to session: %s", sessionID)
+			break
+		}
 	}
 }

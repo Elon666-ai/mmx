@@ -1,0 +1,6 @@
+{
+    "HttpPort": 8080,
+    "Storage":{
+        "OutputBucket": "s3://ge-lotto-live"
+    }
+}

@@ -26,7 +26,9 @@ import (
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/httpp"
 	"github.com/bluenviron/mediamtx/internal/protocols/webrtc"
+	wsprotocol "github.com/bluenviron/mediamtx/internal/protocols/websocket"
 	"github.com/bluenviron/mediamtx/internal/stream"
+	"github.com/bluenviron/mediamtx/worker/models"
 )
 
 func whipOffer(body []byte) *pwebrtc.SessionDescription {
@@ -67,12 +69,21 @@ type session struct {
 	mutex     sync.RWMutex
 	pc        *webrtc.PeerConnection
 
-	chNew            chan webRTCNewSessionReq
-	chAddCandidates  chan webRTCAddSessionCandidatesReq
+	chNew           chan webRTCNewSessionReq
+	chAddCandidates chan webRTCAddSessionCandidatesReq
 	chRenegotiate   chan webRTCRenegotiateSessionReq
 
-	// Simulcast state
+	// ABR state
 	currentBandwidthLimit int // Current bandwidth limit in kbps (0 = unlimited)
+
+	// ABR Track Switching
+	trackSwitcher *webrtc.TrackSwitcher
+
+	// ABR WebSocket Control
+	wsConn          *WSControlConnection
+	currentTrackID  int
+	availableTracks []wsprotocol.TrackInfo2
+	trackMutex      sync.RWMutex
 }
 
 func (s *session) initialize() {
@@ -101,6 +112,10 @@ func (s *session) Log(level logger.Level, format string, args ...any) {
 }
 
 func (s *session) Close() {
+	// Clean up track switcher
+	if s.trackSwitcher != nil {
+		s.trackSwitcher.Close()
+	}
 	s.ctxCancel()
 }
 
@@ -286,6 +301,13 @@ func (s *session) runPublish() (int, error) {
 	}
 }
 
+// Fixed runRead() function for internal/servers/webrtc/session.go
+// Replace lines 303-445 with this code
+//
+// This fix addresses the resource leak issue where failing sessions
+// (e.g., "codecs not supported by client") don't properly clean up
+// TrackSwitcher resources, eventually affecting other clients.
+
 func (s *session) runRead() (int, error) {
 	ip, _, _ := net.SplitHostPort(s.req.remoteAddr)
 
@@ -335,7 +357,53 @@ func (s *session) runRead() (int, error) {
 
 	r := &stream.Reader{Parent: s}
 
-	err = webrtc.FromStreamWithConfig(strm.Desc, r, pc, path)
+	// ========================================================================
+	// FIX 1: Setup early cleanup for TrackSwitcher
+	// This ensures cleanup happens even if we return early (e.g., CreateFullAnswer fails)
+	// ========================================================================
+	var trackSwitcherCreated bool
+	defer func() {
+		if trackSwitcherCreated && s.trackSwitcher != nil {
+			// Only close if we haven't reached the success point
+			// (success point is after strm.AddReader)
+			s.Log(logger.Debug, "Early cleanup: closing trackSwitcher due to early return")
+			s.trackSwitcher.Close()
+			s.trackSwitcher = nil
+		}
+	}()
+
+	useTrackSwitcher := false
+	if server, ok := s.parent.(*Server); ok {
+		useTrackSwitcher = server.ABREnable
+		s.Log(logger.Info, "ABR Config: enabled=%v for path '%s'", useTrackSwitcher, s.req.pathName)
+	}
+
+	if useTrackSwitcher {
+		s.Log(logger.Info, "WebRTC ABR enabled for path '%s', using TrackSwitcher", s.req.pathName)
+		// Create and initialize track switcher for ABR
+		s.trackSwitcher = webrtc.NewTrackSwitcher(s.ctx, s)
+		trackSwitcherCreated = true
+
+		// Setup tracks from stream using track switcher
+		err = s.trackSwitcher.SetupFromStream(strm.Desc, r, pc, path)
+		if err != nil {
+			// Fallback to standard setup if track switcher fails
+			s.Log(logger.Warn, "Track switcher setup failed, falling back to standard: %v", err)
+			// ========================================================================
+			// FIX 2: Explicitly close trackSwitcher on fallback
+			// ========================================================================
+			if s.trackSwitcher != nil {
+				s.trackSwitcher.Close()
+			}
+			s.trackSwitcher = nil
+			trackSwitcherCreated = false
+			err = webrtc.FromStreamWithConfig(strm.Desc, r, pc, path)
+		}
+	} else {
+		// Standard setup for non-ABR paths (按需回源拉流等)
+		err = webrtc.FromStreamWithConfig(strm.Desc, r, pc, path)
+	}
+
 	if err != nil {
 		return http.StatusBadRequest, err
 	}
@@ -362,8 +430,12 @@ func (s *session) runRead() (int, error) {
 
 	offer := whipOffer(s.req.offer)
 
+	// ========================================================================
+	// FIX 3: If CreateFullAnswer fails here, cleanup happens via defer above
+	// ========================================================================
 	answer, err := pc.CreateFullAnswer(offer)
 	if err != nil {
+		s.Log(logger.Warn, "CreateFullAnswer failed: %v (cleanup will be handled by defer)", err)
 		return http.StatusBadRequest, err
 	}
 
@@ -382,6 +454,7 @@ func (s *session) runRead() (int, error) {
 
 	s.Log(logger.Info, "is reading from path '%s', %s",
 		path.Name(), defs.FormatsInfo(r.Formats()))
+	models.WorkerPathManager.AddPaths(path.Name())
 
 	onUnreadHook := hooks.OnRead(hooks.OnReadParams{
 		Logger:          s,
@@ -393,17 +466,37 @@ func (s *session) runRead() (int, error) {
 	})
 	defer onUnreadHook()
 
+	// ========================================================================
+	// FIX 4: Success point reached - cancel early cleanup
+	// From this point, normal cleanup flow takes over
+	// ========================================================================
+	trackSwitcherCreated = false
+
 	strm.AddReader(r)
 	defer strm.RemoveReader(r)
 
+	// ========================================================================
+	// FIX 5: Setup normal cleanup for successful session
+	// This will execute when the session ends normally
+	// ========================================================================
+	defer func() {
+		if s.trackSwitcher != nil {
+			s.trackSwitcher.Close()
+			s.trackSwitcher = nil
+		}
+	}()
+
 	select {
 	case <-pc.Failed():
+		models.WorkerPathManager.DeletePath(path.Name())
 		return 0, fmt.Errorf("peer connection closed")
 
 	case err = <-r.Error():
+		models.WorkerPathManager.DeletePath(path.Name())
 		return 0, err
 
 	case <-s.ctx.Done():
+		models.WorkerPathManager.DeletePath(path.Name())
 		return 0, fmt.Errorf("terminated")
 	}
 }
@@ -441,19 +534,36 @@ func (s *session) handleRenegotiation(req webRTCRenegotiateSessionReq) (int, err
 	var sdp sdp.SessionDescription
 	err := sdp.Unmarshal(req.offer)
 	if err != nil {
-		s.Log(logger.Error, "Failed to parse SDP: %v", err)
-		return http.StatusBadRequest, fmt.Errorf("invalid SDP: %v", err)
+		s.Log(logger.Error, "Failed to unmarshal SDP: %v", err)
+		return http.StatusBadRequest, fmt.Errorf("invalid SDP: %w", err)
 	}
 
-	// Extract bandwidth limit from b=AS attribute (for Simulcast)
+	s.Log(logger.Debug, "Parsed SDP: %d medias", len(sdp.MediaDescriptions))
+
+	// Extract bandwidth limit from SDP
 	bandwidthLimit := s.extractBandwidthLimit(&sdp)
 	s.currentBandwidthLimit = bandwidthLimit
-
 	s.Log(logger.Info, "Extracted bandwidth limit: %d kbps", bandwidthLimit)
-	s.Log(logger.Info, "SDP renegotiation with bandwidth limit: %d kbps", bandwidthLimit)
 
-	// TODO: Implement RTP source switching based on bandwidth limit
-	// For now, we perform the renegotiation handshake but don't actually change streams
+	// Perform track switching based on bandwidth limit if track switcher is available
+	if s.trackSwitcher != nil && bandwidthLimit > 0 {
+		targetTrackID := s.selectTrackForBandwidth(bandwidthLimit)
+		if targetTrackID != s.currentTrackID {
+			s.Log(logger.Info, "Switching track based on bandwidth limit %d kbps: %d -> %d",
+				bandwidthLimit, s.currentTrackID, targetTrackID)
+			if err := s.trackSwitcher.SwitchToTrack(targetTrackID); err != nil {
+				s.Log(logger.Warn, "Track switch failed, continuing with current track: %v", err)
+				// Continue with renegotiation even if track switch fails
+			} else {
+				s.currentTrackID = targetTrackID
+			}
+		} else {
+			s.Log(logger.Debug, "No track switch needed, already on optimal track %d for bandwidth %d kbps",
+				targetTrackID, bandwidthLimit)
+		}
+	} else if s.trackSwitcher == nil {
+		s.Log(logger.Debug, "No track switcher available, skipping ABR switching")
+	}
 
 	// Perform proper WebRTC renegotiation:
 	// 1. Set the new remote offer
@@ -467,7 +577,7 @@ func (s *session) handleRenegotiation(req webRTCRenegotiateSessionReq) (int, err
 
 	s.Log(logger.Info, "Peer connection available, proceeding with renegotiation")
 
-	// Set the remote offer (client's new offer)
+	// Create offer from the received SDP
 	offer := &pwebrtc.SessionDescription{
 		Type: pwebrtc.SDPTypeOffer,
 		SDP:  string(req.offer),
@@ -524,26 +634,6 @@ func (s *session) handleRenegotiation(req webRTCRenegotiateSessionReq) (int, err
 	}
 
 	return 0, nil
-}
-
-func (s *session) extractBandwidthLimit(sdpDesc *sdp.SessionDescription) int {
-	// Look for video media section
-	for _, media := range sdpDesc.MediaDescriptions {
-		if media.MediaName.Media == "video" {
-			// Look for b=AS attribute
-			for _, attr := range media.Attributes {
-				if attr.Key == "b" && strings.HasPrefix(attr.Value, "AS:") {
-					parts := strings.Split(attr.Value, ":")
-					if len(parts) == 2 {
-						if bandwidth, err := strconv.Atoi(parts[1]); err == nil {
-							return bandwidth
-						}
-					}
-				}
-			}
-		}
-	}
-	return 0 // No bandwidth limit specified
 }
 
 // new is called by webRTCHTTPServer through Server.
@@ -641,16 +731,266 @@ func (s *session) apiItem() *defs.APIWebRTCSession {
 			}
 			return defs.APIWebRTCSessionStateRead
 		}(),
-		Path:                s.req.pathName,
-		Query:               s.req.httpRequest.URL.RawQuery,
-		BytesReceived:       bytesReceived,
-		BytesSent:           bytesSent,
-		RTPPacketsReceived:  rtpPacketsReceived,
-		RTPPacketsSent:      rtpPacketsSent,
-		RTPPacketsLost:      rtpPacketsLost,
-		RTPPacketsJitter:       rtpPacketsJitter,
-		RTCPPacketsReceived:    rtcpPacketsReceived,
-		RTCPPacketsSent:        rtcpPacketsSent,
+		Path:                    s.req.pathName,
+		Query:                   s.req.httpRequest.URL.RawQuery,
+		BytesReceived:           bytesReceived,
+		BytesSent:               bytesSent,
+		RTPPacketsReceived:      rtpPacketsReceived,
+		RTPPacketsSent:          rtpPacketsSent,
+		RTPPacketsLost:          rtpPacketsLost,
+		RTPPacketsJitter:        rtpPacketsJitter,
+		RTCPPacketsReceived:     rtcpPacketsReceived,
+		RTCPPacketsSent:         rtcpPacketsSent,
 		SimulcastBandwidthLimit: simulcastBandwidthLimit,
 	}
+}
+
+// SetWSConnection sets the WebSocket control connection.
+func (s *session) SetWSConnection(conn *WSControlConnection) {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	s.wsConn = conn
+
+	// Collect track information
+	s.availableTracks = s.CollectTrackInfoImproved()
+	s.currentTrackID = 0 // Default to first track
+
+	s.Log(logger.Info, "WebSocket control connection established, %d tracks available", len(s.availableTracks))
+}
+
+// GetTracksInfo returns the current tracks information.
+// If tracks haven't been collected yet, collect them now (lazy loading)
+// This ensures tracks are available even when SetWSConnection() wasn't called
+func (s *session) GetTracksInfo() wsprotocol.TracksInfoPayload {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Lazy load tracks if not already collected
+	// This happens when WebSocket connects before SetWSConnection() is called
+	if len(s.availableTracks) == 0 {
+		s.Log(logger.Debug, "ABR: availableTracks is empty, collecting now (lazy loading)...")
+		s.availableTracks = s.CollectTrackInfoImproved()
+		s.currentTrackID = 0
+		s.Log(logger.Info, "ABR: Lazy-loaded %d tracks for session", len(s.availableTracks))
+	}
+
+	return wsprotocol.TracksInfoPayload{
+		ActiveTrackID: s.currentTrackID,
+		Tracks:        s.availableTracks,
+	}
+}
+
+// isHealthy checks if the session is healthy and can accept WebSocket connections.
+func (s *session) isHealthy() bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// Check if session context is still active
+	if s.ctx.Err() != nil {
+		return false
+	}
+
+	// Check if we have available tracks
+	if len(s.availableTracks) == 0 {
+		return false
+	}
+
+	return true
+}
+
+// onWSClosed is called when WebSocket connection is closed.
+func (s *session) onWSClosed() {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	s.wsConn = nil
+	s.Log(logger.Info, "WebSocket control connection closed")
+}
+
+// collectTrackInfo collects track information from the stream.
+func (s *session) collectTrackInfo() []wsprotocol.TrackInfo2 {
+	tracks := []wsprotocol.TrackInfo2{}
+
+	// For now, return a basic example
+	// TODO: Extract from s.stream.Desc().Medias when stream is available
+
+	// Example tracks for Simulcast (3 video + 1 audio)
+	tracks = append(tracks, wsprotocol.TrackInfo2{
+		ID:      0,
+		Type:    "video",
+		Codec:   "h264",
+		Label:   "High",
+		Bitrate: 2000000,
+		Width:   1920,
+		Height:  1080,
+	})
+
+	tracks = append(tracks, wsprotocol.TrackInfo2{
+		ID:      1,
+		Type:    "video",
+		Codec:   "h264",
+		Label:   "Medium",
+		Bitrate: 1000000,
+		Width:   1280,
+		Height:  720,
+	})
+
+	tracks = append(tracks, wsprotocol.TrackInfo2{
+		ID:      2,
+		Type:    "video",
+		Codec:   "h264",
+		Label:   "Low",
+		Bitrate: 500000,
+		Width:   960,
+		Height:  540,
+	})
+
+	tracks = append(tracks, wsprotocol.TrackInfo2{
+		ID:      3,
+		Type:    "audio",
+		Codec:   "opus",
+		Label:   "audio",
+		Bitrate: 128000,
+	})
+
+	s.Log(logger.Debug, "collected %d tracks", len(tracks))
+
+	return tracks
+}
+
+// SwitchVideoTrack switches to a different track (video or audio).
+func (s *session) SwitchVideoTrack(targetID int) error {
+	s.trackMutex.Lock()
+	defer s.trackMutex.Unlock()
+
+	// Use track switcher if available
+	if s.trackSwitcher != nil {
+		s.Log(logger.Info, "Using track switcher for track change to %d", targetID)
+
+		if err := s.trackSwitcher.SwitchToTrack(targetID); err != nil {
+			s.Log(logger.Error, "Track switch failed: %v", err)
+			return err
+		}
+
+		// Update session state
+		oldTrackID := s.currentTrackID
+		s.currentTrackID = targetID
+
+		s.Log(logger.Info, "Track switch completed via track switcher: %d -> %d", oldTrackID, targetID)
+		return nil
+	}
+
+	// Fallback to state-only update if track switcher not available
+	s.Log(logger.Warn, "Track switcher not available, only updating state (no actual switch)")
+
+	if targetID == s.currentTrackID {
+		return nil
+	}
+
+	oldTrackID := s.currentTrackID
+	s.currentTrackID = targetID
+	s.Log(logger.Info, "State-only track switch: %d -> %d (no RTP switching)", oldTrackID, targetID)
+
+	return nil
+}
+
+// extractBandwidthLimit extracts the bandwidth limit from SDP b=AS attribute
+func (s *session) extractBandwidthLimit(sdpDesc *sdp.SessionDescription) int {
+	// Look for video media section
+	for _, media := range sdpDesc.MediaDescriptions {
+		if media.MediaName.Media == "video" {
+			// Look for b=AS attribute
+			for _, attr := range media.Attributes {
+				if attr.Key == "b" && strings.HasPrefix(attr.Value, "AS:") {
+					parts := strings.Split(attr.Value, ":")
+					if len(parts) == 2 {
+						if bandwidth, err := strconv.Atoi(parts[1]); err == nil {
+							return bandwidth
+						}
+					}
+				}
+			}
+		}
+	}
+	return 0 // No bandwidth limit specified
+}
+
+// selectTrackForBandwidth selects the best track based on available bandwidth
+// Enhanced to support audio-only mode for very low bandwidth (<350 kbps)
+func (s *session) selectTrackForBandwidth(bandwidthKbps int) int {
+	s.trackMutex.RLock()
+	defer s.trackMutex.RUnlock()
+
+	if len(s.availableTracks) == 0 {
+		s.Log(logger.Debug, "No available tracks, returning current track ID 0")
+		return 0
+	}
+
+	// ✅ NEW: Audio-only mode for very low bandwidth (<350 kbps)
+	// When bandwidth is critically low, switch to audio-only to maintain connection
+	if bandwidthKbps < 350 {
+		s.Log(logger.Info, "Bandwidth %d kbps < 350 kbps, switching to audio-only mode", bandwidthKbps)
+
+		// Find audio track (should be the last track in the list)
+		for i := len(s.availableTracks) - 1; i >= 0; i-- {
+			if s.availableTracks[i].Type == "audio" {
+				s.Log(logger.Info, "Switching to audio track ID: %d (codec: %s, bitrate: %d bps)",
+					s.availableTracks[i].ID,
+					s.availableTracks[i].Codec,
+					s.availableTracks[i].Bitrate)
+				return s.availableTracks[i].ID
+			}
+		}
+
+		// If no audio track found, fall through to video selection
+		s.Log(logger.Warn, "No audio track found for audio-only mode, using lowest video quality")
+	}
+
+	// Find the video track with highest bitrate that fits within the bandwidth limit
+	bestTrackID := 0
+	bestBitrate := 0
+
+	for _, track := range s.availableTracks {
+		if track.Type == "video" && track.Bitrate <= bandwidthKbps*1000 { // Convert kbps to bps
+			if track.Bitrate > bestBitrate {
+				bestBitrate = track.Bitrate
+				bestTrackID = track.ID
+			}
+		}
+	}
+
+	// If no track fits the bandwidth, use the lowest bitrate video track
+	if bestBitrate == 0 {
+		lowestBitrate := 0
+		for _, track := range s.availableTracks {
+			if track.Type == "video" {
+				if lowestBitrate == 0 || track.Bitrate < lowestBitrate {
+					lowestBitrate = track.Bitrate
+					bestTrackID = track.ID
+				}
+			}
+		}
+		bestBitrate = lowestBitrate
+	}
+
+	s.Log(logger.Debug, "Selected track %d with bitrate %d bps for bandwidth limit %d kbps",
+		bestTrackID, bestBitrate, bandwidthKbps)
+	return bestTrackID
+}
+
+// isValidTrackID checks if a track ID is valid for switching.
+// Note: This method is kept for backward compatibility but the main validation
+// is now done in SwitchVideoTrack with dynamic track collection.
+func (s *session) isValidTrackID(trackID int) bool {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// If we have cached tracks, check against them
+	if len(s.availableTracks) > 0 {
+		return trackID >= 0 && trackID < len(s.availableTracks)
+	}
+
+	// If no cached tracks, we can't validate here - validation happens in SwitchVideoTrack
+	return trackID >= 0
 }

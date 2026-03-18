@@ -7,6 +7,7 @@ import (
 	"github.com/bluenviron/mediacommon/v2/pkg/formats/fmp4"
 	mcodecs "github.com/bluenviron/mediacommon/v2/pkg/formats/mp4/codecs"
 	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/worker/tracer"
 )
 
 const (
@@ -115,16 +116,36 @@ func (t *formatFMP4Track) write(sample *formatFMP4Sample) error {
 		return err
 	}
 
+	if t.initTrack.Codec.IsVideo() {
+		t.f.ri.lastVideoTS = time.Now()
+	} else {
+		t.f.ri.lastAudioTS = time.Now()
+	}
+
 	nextDTS := timestampToDuration(t.nextSample.dts, int(t.initTrack.TimeScale))
 
-	if (!t.f.hasVideo || t.initTrack.Codec.IsVideo()) &&
-		!t.nextSample.IsNonSyncSample &&
-		(nextDTS-t.f.currentSegment.startDTS) >= t.f.ri.segmentDuration {
-		err = t.f.currentSegment.close()
-		if err != nil {
-			return err
+	if !t.nextSample.IsNonSyncSample &&
+		((nextDTS-t.f.currentSegment.startDTS) >= t.f.ri.segmentDuration || t.f.ri.splitFlag == 1) {
+
+		var code string = time.Now().Format("20060102150405")
+		var doUpload bool = false
+		// var dur int = int(time.Now().UnixMilli() - t.f.ri.splitStartTS)
+		if t.f.ri.splitFlag == 1 {
+			if len(t.f.ri.round) > 1 {
+				code = t.f.ri.recordFile
+				// if dur < 5000 {
+				// 	// tracer.LogDebug(tracer.ID_APP, "code=%s, dur=%d ms. recording is too short to save.", code, dur)
+				// 	return nil
+				// }
+				doUpload = true
+			}
+		} else {
+			tracer.LogDebug(tracer.ID_APP, "split-record. %d >= %d", nextDTS, t.f.ri.segmentDuration)
+			code += "-30m"
+			doUpload = false
 		}
 
+		t.f.currentSegment.close(code, doUpload)
 		oldestNTP, oldestDTS := nextSegmentStartingPos(t.f.tracks)
 
 		t.f.currentSegment = &formatFMP4Segment{
@@ -135,6 +156,9 @@ func (t *formatFMP4Track) write(sample *formatFMP4Sample) error {
 		}
 		t.f.currentSegment.initialize()
 		t.f.nextSegmentNumber++
+		t.f.ri.splitStartTS = time.Now().UnixMilli()
+		t.f.ri.splitFlag = 0
+		t.f.ri.recordFile = ""
 	}
 
 	return nil

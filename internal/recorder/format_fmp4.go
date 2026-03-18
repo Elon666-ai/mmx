@@ -895,6 +895,6 @@ func (f *formatFMP4) updateCodecParams() {
 
 func (f *formatFMP4) close() {
 	if f.currentSegment != nil {
-		f.currentSegment.close() //nolint:errcheck
+		f.currentSegment.close(time.Now().Format("20060102150405"), false) //nolint:errcheck
 	}
 }

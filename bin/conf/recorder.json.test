@@ -1,0 +1,11 @@
+{
+    "HttpPort": 8080,
+    "PullStreamFromMMX": true,
+    "PullStreamAuthMethod": "http",
+    "InputStreamList": [
+        "rtmp://localhost:1935/live/simulcast-fwv"
+    ],
+    "OutputStreamer": {
+        "RtmpServer": "rtmp://localhost:1965"
+    }
+}

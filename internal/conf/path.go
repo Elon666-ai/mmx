@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	srt "github.com/datarhei/gosrt"
 	"github.com/bluenviron/gortsplib/v5/pkg/base"
 	"github.com/bluenviron/mediamtx/internal/logger"
+	srt "github.com/datarhei/gosrt"
 )
 
 var rePathName = regexp.MustCompile(`^[0-9a-zA-Z_\-/\.~:]+$`)
@@ -165,12 +165,11 @@ type Path struct {
 	// Redirect source
 	SourceRedirect string `json:"sourceRedirect"`
 
-
 	// Origin Node - Pull from origin node
-	OrigNode                 string   `json:"origNode"`
-	OrigNodeOnDemand         bool     `json:"origNodeOnDemand"`
-	OrigNodeStartTimeout     Duration `json:"origNodeStartTimeout"`
-	OrigNodeCloseAfter       Duration `json:"origNodeCloseAfter"`
+	OrigNode             string   `json:"origNode"`
+	OrigNodeOnDemand     bool     `json:"origNodeOnDemand"`
+	OrigNodeStartTimeout Duration `json:"origNodeStartTimeout"`
+	OrigNodeCloseAfter   Duration `json:"origNodeCloseAfter"`
 	// Raspberry Pi Camera source
 	RPICameraCamID                 uint      `json:"rpiCameraCamID"`
 	RPICameraSecondary             bool      `json:"rpiCameraSecondary"`
@@ -245,9 +244,6 @@ type Path struct {
 
 	// SRT Transcoding
 	SRTTranscoding *SRTTranscodingConfig `json:"srtTranscoding,omitempty"`
-
-	// Simulcast WebRTC
-	SimulcastConfig *SimulcastConfig `json:"simulcastConfig,omitempty"`
 }
 
 // SRTForwardTarget is a SRT forward target configuration.
@@ -259,14 +255,14 @@ type SRTForwardTarget struct {
 	Enable bool `json:"enable"`
 
 	// Reconnect configuration
-	Reconnect        bool     `json:"reconnect"`         // Auto reconnect on failure
-	ReconnectDelay   Duration `json:"reconnectDelay"`     // Reconnect delay
-	MaxReconnectTime Duration `json:"maxReconnectTime"`  // Maximum reconnect time
+	Reconnect        bool     `json:"reconnect"`        // Auto reconnect on failure
+	ReconnectDelay   Duration `json:"reconnectDelay"`   // Reconnect delay
+	MaxReconnectTime Duration `json:"maxReconnectTime"` // Maximum reconnect time
 
 	// SRT specific configuration
 	Passphrase string `json:"passphrase,omitempty"` // SRT passphrase
-	Latency    uint   `json:"latency"`               // Latency in milliseconds, default 120
-	PacketSize uint   `json:"packetSize"`            // Packet size, default 1316
+	Latency    uint   `json:"latency"`              // Latency in milliseconds, default 120
+	PacketSize uint   `json:"packetSize"`           // Packet size, default 1316
 }
 
 // WebRTCForwardTarget is a WebRTC forward target configuration.
@@ -278,9 +274,9 @@ type WebRTCForwardTarget struct {
 	Enable bool `json:"enable"`
 
 	// Reconnect configuration
-	Reconnect        bool     `json:"reconnect"`         // Auto reconnect on failure
-	ReconnectDelay   Duration `json:"reconnectDelay"`     // Reconnect delay
-	MaxReconnectTime Duration `json:"maxReconnectTime"`  // Maximum reconnect time
+	Reconnect        bool     `json:"reconnect"`        // Auto reconnect on failure
+	ReconnectDelay   Duration `json:"reconnectDelay"`   // Reconnect delay
+	MaxReconnectTime Duration `json:"maxReconnectTime"` // Maximum reconnect time
 
 	// WebRTC specific configuration
 	Fingerprint string `json:"fingerprint,omitempty"` // TLS fingerprint for verification
@@ -686,12 +682,6 @@ func (pconf *Path) validate(
 	case strings.HasPrefix(pconf.Source, "transcoder:"):
 		// transcoder source is validated in staticsources handler
 
-	case pconf.Source == "simulcast":
-		// simulcast source is validated in staticsources handler
-		if pconf.SimulcastConfig == nil || !pconf.SimulcastConfig.Enable {
-			return fmt.Errorf("simulcast source requires simulcastConfig to be enabled")
-		}
-
 	default:
 		return fmt.Errorf("invalid source: '%s'", pconf.Source)
 	}
@@ -871,48 +861,6 @@ func (pconf *Path) validate(
 
 		if target.Reconnect && target.ReconnectDelay <= 0 {
 			return fmt.Errorf("webrtcForwardTargets[%d]: reconnectDelay must be > 0 when reconnect is enabled", i)
-		}
-	}
-
-	// Simulcast WebRTC
-	if pconf.SimulcastConfig != nil && pconf.SimulcastConfig.Enable {
-		if len(pconf.SimulcastConfig.Inputs) == 0 {
-			return fmt.Errorf("simulcastConfig: inputs cannot be empty when enabled")
-		}
-
-		videoLayers := make(map[string]bool)
-		hasAudio := false
-
-		for i, input := range pconf.SimulcastConfig.Inputs {
-			if input.Path == "" {
-				return fmt.Errorf("simulcastConfig.inputs[%d]: path cannot be empty", i)
-			}
-
-			if input.Type != "video" && input.Type != "audio" {
-				return fmt.Errorf("simulcastConfig.inputs[%d]: type must be 'video' or 'audio'", i)
-			}
-
-			if input.Type == "video" {
-				if input.Layer != "high" && input.Layer != "medium" && input.Layer != "low" {
-					return fmt.Errorf("simulcastConfig.inputs[%d]: video layer must be 'high', 'medium', or 'low'", i)
-				}
-				if input.Resolution == "" {
-					return fmt.Errorf("simulcastConfig.inputs[%d]: video resolution cannot be empty", i)
-				}
-				if videoLayers[input.Layer] {
-					return fmt.Errorf("simulcastConfig.inputs[%d]: duplicate video layer '%s'", i, input.Layer)
-				}
-				videoLayers[input.Layer] = true
-			} else {
-				if hasAudio {
-					return fmt.Errorf("simulcastConfig.inputs[%d]: only one audio input is allowed", i)
-				}
-				hasAudio = true
-			}
-
-			if input.Bitrate == 0 {
-				return fmt.Errorf("simulcastConfig.inputs[%d]: bitrate cannot be zero", i)
-			}
 		}
 	}
 
