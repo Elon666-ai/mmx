@@ -160,6 +160,11 @@ mmx 在遵循原项目 License 的前提下，进行了功能扩展与工程化�
 - Pull Request
 
 欢迎对 WebRTC / 实时音视频 / mediamtx 有兴趣的开发者交流。
+- ppcdn-demo:
+**demo-player**: http://8.220.177.159:8080/vplayer/
+**admin-portal**: http://8.220.177.159:8090
+**recordings**: http://8.220.177.159/mmx/
+
 
 ---
 
